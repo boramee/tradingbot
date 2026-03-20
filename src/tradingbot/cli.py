@@ -447,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sp = sub.add_parser(
         "spread",
-        help="여러 거래소에서 동일 심볼(예: BTC/USDT) mid 가격 차이·스프레드(%) 스캔",
+        help="여러 거래소에서 동일 심볼(예: BTC/USDT) mid 가격 차이·스프레드(%%) 스캔",
     )
     p_sp.add_argument(
         "--symbols",
@@ -556,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_pr = sub.add_parser(
         "premium",
-        help="(보조) USDT/법정화폐 호가 vs USD 환율로 이론가 대비 괴리(%) — 거래소 간 차익과는 별개",
+        help="(보조) USDT/법정화폐 호가 vs USD 환율로 이론가 대비 괴리(%%) — 거래소 간 차익과는 별개",
     )
     p_pr.add_argument(
         "--no-fx",
