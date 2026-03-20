@@ -32,6 +32,69 @@ def arb_min_spread_pct() -> float | None:
         return None
 
 
+def arb_min_net_spread_pct() -> float | None:
+    raw = os.getenv("ARB_MIN_NET_SPREAD_PCT", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def default_taker_fee_pct() -> float:
+    """테이커 수수료(%%). 예: 0.1 → 0.1%."""
+    raw = os.getenv("ARB_TAKER_FEE_PCT", "0.1").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.1
+
+
+def fee_overrides_map() -> dict[str, float]:
+    """
+    ARB_FEE_OVERRIDES=binance:0.04,kraken:0.26,upbit:0.05
+    거래소별 테이커 수수료(%%).
+    """
+    raw = os.getenv("ARB_FEE_OVERRIDES", "").strip()
+    if not raw:
+        return {}
+    out: dict[str, float] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        k, v = part.split(":", 1)
+        k, v = k.strip().lower(), v.strip()
+        try:
+            out[k] = float(v)
+        except ValueError:
+            continue
+    return out
+
+
+def taker_fee_pct_for(exchange_id: str) -> float:
+    m = fee_overrides_map()
+    return m.get(exchange_id.lower(), default_taker_fee_pct())
+
+
+def net_edge_pct_from_mids(
+    buy_mid: float,
+    sell_mid: float,
+    buy_fee_pct: float,
+    sell_fee_pct: float,
+) -> float:
+    """
+    USDT(또는 동일 quote) 기준 스팟: 저가 거래소에서 매수 → 고가 거래소에서 매도.
+    테이커 가정: 매수는 (1+f_buy), 매도는 (1-f_sell) 배율로 단순 모델링.
+    """
+    eff_buy = buy_mid * (1.0 + buy_fee_pct / 100.0)
+    eff_sell = sell_mid * (1.0 - sell_fee_pct / 100.0)
+    if eff_buy <= 0:
+        return 0.0
+    return (eff_sell - eff_buy) / eff_buy * 100.0
+
+
 def _build_public(exchange_id: str) -> ccxt.Exchange:
     klass = getattr(ccxt, exchange_id, None)
     if klass is None:
@@ -83,7 +146,7 @@ class CrossSpreadReport:
     spread_pct: float | None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "symbol": self.symbol,
             "venues": [v.as_dict() for v in self.venues],
             "min_exchange": self.min_exchange,
@@ -92,6 +155,13 @@ class CrossSpreadReport:
             "max_mid": self.max_mid,
             "spread_pct": self.spread_pct,
         }
+        opp = opportunity_from_cross_report(self)
+        if opp is not None:
+            d["opportunity"] = opp.as_dict()
+        return d
+
+    def opportunity(self) -> "ArbOpportunity | None":
+        return opportunity_from_cross_report(self)
 
 
 def _quote_one(exchange_id: str, symbol: str) -> VenueQuote:
@@ -152,6 +222,142 @@ def scan_cross_spread(
 
 
 @dataclass(frozen=True)
+class ArbOpportunity:
+    """거래소 간 동일 심볼 mid 차익 후보(테이커 수수료 단순 차감)."""
+
+    kind: str  # "cross_mid"
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    buy_mid: float
+    sell_mid: float
+    gross_spread_pct: float
+    buy_taker_fee_pct: float
+    sell_taker_fee_pct: float
+    net_edge_pct: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "symbol": self.symbol,
+            "buy_exchange": self.buy_exchange,
+            "sell_exchange": self.sell_exchange,
+            "buy_mid": self.buy_mid,
+            "sell_mid": self.sell_mid,
+            "gross_spread_pct": self.gross_spread_pct,
+            "buy_taker_fee_pct": self.buy_taker_fee_pct,
+            "sell_taker_fee_pct": self.sell_taker_fee_pct,
+            "net_edge_pct": self.net_edge_pct,
+        }
+
+
+def opportunity_from_cross_report(r: CrossSpreadReport) -> ArbOpportunity | None:
+    if (
+        r.spread_pct is None
+        or r.min_exchange is None
+        or r.max_exchange is None
+        or r.min_mid is None
+        or r.max_mid is None
+    ):
+        return None
+    bf = taker_fee_pct_for(r.min_exchange)
+    sf = taker_fee_pct_for(r.max_exchange)
+    net = net_edge_pct_from_mids(r.min_mid, r.max_mid, bf, sf)
+    return ArbOpportunity(
+        kind="cross_mid",
+        symbol=r.symbol,
+        buy_exchange=r.min_exchange,
+        sell_exchange=r.max_exchange,
+        buy_mid=r.min_mid,
+        sell_mid=r.max_mid,
+        gross_spread_pct=r.spread_pct,
+        buy_taker_fee_pct=bf,
+        sell_taker_fee_pct=sf,
+        net_edge_pct=net,
+    )
+
+
+def opportunities_from_reports(reports: list[CrossSpreadReport]) -> list[ArbOpportunity]:
+    return [o for r in reports if (o := opportunity_from_cross_report(r)) is not None]
+
+
+@dataclass(frozen=True)
+class KimchiOpportunity:
+    """업비트 암시 USDT 가격 vs 해외 USDT 마켓 (같은 단순 테이커 모델)."""
+
+    kind: str  # "kimchi"
+    base: str
+    global_exchange: str
+    symbol_global: str
+    buy_exchange: str
+    sell_exchange: str
+    buy_mid: float
+    sell_mid: float
+    gross_spread_pct: float
+    buy_taker_fee_pct: float
+    sell_taker_fee_pct: float
+    net_edge_pct: float
+    note: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "base": self.base,
+            "global_exchange": self.global_exchange,
+            "symbol_global": self.symbol_global,
+            "buy_exchange": self.buy_exchange,
+            "sell_exchange": self.sell_exchange,
+            "buy_mid": self.buy_mid,
+            "sell_mid": self.sell_mid,
+            "gross_spread_pct": self.gross_spread_pct,
+            "buy_taker_fee_pct": self.buy_taker_fee_pct,
+            "sell_taker_fee_pct": self.sell_taker_fee_pct,
+            "net_edge_pct": self.net_edge_pct,
+            "note": self.note,
+        }
+
+
+def opportunity_from_kimchi_report(r: KimchiReport) -> KimchiOpportunity | None:
+    if (
+        r.upbit_implied_usdt is None
+        or r.global_usdt is None
+        or r.spread_pct is None
+    ):
+        return None
+    gex = r.global_exchange
+    sym_g = f"{r.base}/USDT"
+    # spread_pct = (upbit_implied - global) / global * 100  → 업비트가 더 비쌀 때 양수
+    if r.spread_pct >= 0:
+        buy_ex, sell_ex = gex, "upbit"
+        buy_mid, sell_mid = r.global_usdt, r.upbit_implied_usdt
+        gross = r.spread_pct
+        note = "업비트가 해외보다 비쌈: 해외에서 매수 → 업비트에서 매도(이론, 이체·규제 미반영)"
+    else:
+        buy_ex, sell_ex = "upbit", gex
+        buy_mid, sell_mid = r.upbit_implied_usdt, r.global_usdt
+        gross = (sell_mid - buy_mid) / buy_mid * 100.0 if buy_mid > 0 else r.spread_pct
+        note = "해외가 더 비쌈: 업비트에서 매수 → 해외에서 매도(이론, 이체·규제 미반영)"
+    bf = taker_fee_pct_for(buy_ex)
+    sf = taker_fee_pct_for(sell_ex)
+    net = net_edge_pct_from_mids(buy_mid, sell_mid, bf, sf)
+    return KimchiOpportunity(
+        kind="kimchi",
+        base=r.base,
+        global_exchange=gex,
+        symbol_global=sym_g,
+        buy_exchange=buy_ex,
+        sell_exchange=sell_ex,
+        buy_mid=buy_mid,
+        sell_mid=sell_mid,
+        gross_spread_pct=gross,
+        buy_taker_fee_pct=bf,
+        sell_taker_fee_pct=sf,
+        net_edge_pct=net,
+        note=note,
+    )
+
+
+@dataclass(frozen=True)
 class KimchiReport:
     """업비트 KRW 마켓을 USDT로 환산한 뒤 해외 BTC/USDT와 비교 (김치 프리미엄 스타일)."""
 
@@ -164,7 +370,7 @@ class KimchiReport:
     errors: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "base": self.base,
             "upbit_implied_usdt": self.upbit_implied_usdt,
             "global_usdt": self.global_usdt,
@@ -173,6 +379,10 @@ class KimchiReport:
             "detail": self.detail,
             "errors": list(self.errors),
         }
+        ko = opportunity_from_kimchi_report(self)
+        if ko is not None:
+            d["opportunity"] = ko.as_dict()
+        return d
 
 
 def scan_kimchi_vs_global(
@@ -288,6 +498,31 @@ def watch_cross_spread(
             filtered = [r for r in reps if r.spread_pct is not None and r.spread_pct >= min_spread_pct]
             if filtered:
                 emit(filtered)
+        if should_stop and should_stop():
+            break
+        time.sleep(max(0.5, interval_sec))
+
+
+def watch_signals(
+    *,
+    interval_sec: float,
+    symbols: list[str] | None,
+    exchanges: list[str] | None,
+    min_net_spread_pct: float | None,
+    emit: Callable[[list[ArbOpportunity]], None],
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """순스프레드(수수료 차감 후) 기준으로만 알림."""
+    while True:
+        reps = scan_cross_spread(symbols=symbols, exchanges=exchanges)
+        opps = opportunities_from_reports(reps)
+        if min_net_spread_pct is None:
+            if opps:
+                emit(opps)
+        else:
+            hit = [o for o in opps if o.net_edge_pct >= min_net_spread_pct]
+            if hit:
+                emit(hit)
         if should_stop and should_stop():
             break
         time.sleep(max(0.5, interval_sec))

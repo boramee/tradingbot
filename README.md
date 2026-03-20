@@ -8,7 +8,9 @@
 - **`kimchi`**: 업비트 `BTC/KRW`·`USDT/KRW`로 **암시적 `BTC/USDT`**를 만들고, 해외 거래소(기본 `binance`)의 `BTC/USDT`와 비교합니다. 말로 하던 **김치 프리미엄(국내 vs 해외) 스타일** 분석에 가깝습니다.
 - **`premium`**: (보조) 각 거래소의 **USDT/법정화폐** 호가를 **USD 환율 대비**로 본 **이론가 괴리(%)**입니다. **거래소 A↔B 직접 차익**과는 목적이 다릅니다.
 
-**자동 매매**: 현재 CLI는 **신호·조회**까지입니다. 실제 차익거래는 **이체·수수료·슬리피지·API 지연** 때문에 주문 로직을 별도로 설계해야 하며, 기본값은 **실주문 차단(`DRY_RUN`)** 입니다.
+**자동 매매**: `signals` / `simulate-arb`는 **신호·시뮬 출력**만 합니다. `simulate-arb`는 **실주문을 넣지 않습니다.** 실제 차익거래는 **이체·수수료·슬리피지·API 지연** 때문에 주문 로직을 별도로 설계해야 하며, 단일 거래소 주문은 기본 **실주문 차단(`DRY_RUN`)** 입니다.
+
+**수수료 모델**: `ARB_TAKER_FEE_PCT`(기본 0.1%)와 `ARB_FEE_OVERRIDES`로 거래소별 테이커를 넣을 수 있습니다. 순스프레드는 **단순 mid × (1±f)** 가정이며, VIP·메이커·쿠폰은 반영하지 않습니다.
 
 ## 전제
 
@@ -51,6 +53,15 @@ tradingbot ticker BTC/USDT
 tradingbot spread
 tradingbot spread --symbols BTC/USDT,ETH/USDT --exchanges binance,okx,kraken
 tradingbot spread --watch --interval 5 --min-pct 0.12
+tradingbot spread --show-net
+
+# 순스프레드(테이커 수수료 단순 차감) 신호 + 김프 경로 포함 옵션
+tradingbot signals --min-net-pct 0.08
+tradingbot signals --watch --interval 5 --kimchi --kimchi-base BTC
+
+# 차익 후보만 골라 양다리 주문을 ‘글로’ 시뮬레이션 (실주문 없음)
+tradingbot simulate-arb 0.001 --symbols BTC/USDT --exchanges kraken,bitstamp
+tradingbot simulate-arb 0.01 --kimchi --kimchi-base BTC
 
 # 업비트 암시 USDT vs 해외 USDT 마켓 (김프 스타일)
 tradingbot kimchi --base BTC
