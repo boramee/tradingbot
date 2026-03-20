@@ -1,63 +1,122 @@
 #!/usr/bin/env python3
-"""
-기술적 분석 자동매매 봇 실행 스크립트.
+"""삼성전자 자동매매 프로그램 실행
 
 사용법:
-  python3 run_trader.py                          # 시뮬레이션 모드 (BTC, combined)
-  python3 run_trader.py --ticker KRW-ETH         # ETH 대상
-  python3 run_trader.py --strategy rsi            # RSI 전략
-  python3 run_trader.py --interval 30             # 30초 주기
-  python3 run_trader.py --stop-loss 5 --take-profit 8
+    # 모의투자 (기본)
+    python run_trader.py
+
+    # 실전투자
+    python run_trader.py --live
+
+    # 전략 지정
+    python run_trader.py --strategy rsi
+    python run_trader.py --strategy macd
+    python run_trader.py --strategy bollinger
+    python run_trader.py --strategy ma_cross
+    python run_trader.py --strategy combined
+
+    # 종목 변경
+    python run_trader.py --code 005935 --name 삼성전자우
+
+    # 매매 주기 변경
+    python run_trader.py --interval 30
+
+    # 1회 분석만 실행
+    python run_trader.py --once
 """
 
-from __future__ import annotations
-
 import argparse
-import os
 import sys
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-sys.path.insert(0, os.path.dirname(__file__))
-
+from config.settings import AppConfig
 from src.utils.logger import setup_logger
 from src.trader.engine import TraderEngine
 
 
-def main():
-    parser = argparse.ArgumentParser(description="기술적 분석 자동매매 봇")
-    parser.add_argument("--ticker", default=os.getenv("TICKER", "KRW-BTC"), help="거래 대상 (기본: KRW-BTC)")
-    parser.add_argument("--strategy", default=os.getenv("STRATEGY", "combined"),
-                        choices=["rsi", "macd", "bollinger", "combined"], help="매매 전략")
-    parser.add_argument("--interval", type=int, default=60, help="조회 주기 (초)")
-    parser.add_argument("--candle", default="minute60", help="캔들 간격 (minute1/minute5/minute60/day)")
-    parser.add_argument("--invest-ratio", type=float, default=0.1, help="KRW 잔고 대비 투자 비율")
-    parser.add_argument("--max-invest", type=float, default=100000, help="1회 최대 투자 금액 (KRW)")
-    parser.add_argument("--stop-loss", type=float, default=3.0, help="손절 기준 (%%)")
-    parser.add_argument("--take-profit", type=float, default=5.0, help="익절 기준 (%%)")
-    parser.add_argument("--log-level", default="INFO", help="로그 레벨")
-
-    args = parser.parse_args()
-
-    setup_logger(args.log_level)
-
-    engine = TraderEngine(
-        access_key=os.getenv("UPBIT_ACCESS_KEY", ""),
-        secret_key=os.getenv("UPBIT_SECRET_KEY", ""),
-        ticker=args.ticker,
-        strategy_name=args.strategy,
-        interval=args.candle,
-        invest_ratio=args.invest_ratio,
-        max_invest_krw=args.max_invest,
-        stop_loss_pct=args.stop_loss,
-        take_profit_pct=args.take_profit,
-        telegram_token=os.getenv("TELEGRAM_TOKEN", ""),
-        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="삼성전자 자동매매 프로그램",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--live", action="store_true",
+        help="실전투자 모드 (기본: 모의투자)",
+    )
+    parser.add_argument(
+        "--strategy", type=str, default=None,
+        choices=["rsi", "macd", "bollinger", "ma_cross", "combined"],
+        help="매매 전략 (기본: .env의 STRATEGY 또는 combined)",
+    )
+    parser.add_argument(
+        "--code", type=str, default=None,
+        help="종목코드 (기본: 005930 삼성전자)",
+    )
+    parser.add_argument(
+        "--name", type=str, default=None,
+        help="종목명 (기본: 삼성전자)",
+    )
+    parser.add_argument(
+        "--interval", type=int, default=None,
+        help="매매 체크 주기 (초, 기본: 60)",
+    )
+    parser.add_argument(
+        "--stop-loss", type=float, default=None,
+        help="손절 비율 (%%, 기본: 3.0)",
+    )
+    parser.add_argument(
+        "--take-profit", type=float, default=None,
+        help="익절 비율 (%%, 기본: 5.0)",
+    )
+    parser.add_argument(
+        "--max-amount", type=int, default=None,
+        help="1회 최대 매수 금액 (원, 기본: 1000000)",
+    )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="1회만 분석 후 종료",
+    )
+    return parser.parse_args()
 
-    engine.start(poll_sec=args.interval)
+
+def main():
+    args = parse_args()
+    config = AppConfig()
+
+    if args.strategy:
+        config.trading.strategy = args.strategy
+    if args.code:
+        config.trading.stock_code = args.code
+    if args.name:
+        config.trading.stock_name = args.name
+    if args.interval:
+        config.trading.poll_interval_sec = args.interval
+    if args.stop_loss:
+        config.trading.stop_loss_pct = args.stop_loss
+    if args.take_profit:
+        config.trading.take_profit_pct = args.take_profit
+    if args.max_amount:
+        config.trading.max_buy_amount = args.max_amount
+
+    setup_logger(config.log_level)
+
+    dry_run = not args.live
+    engine = TraderEngine(config, dry_run=dry_run)
+
+    if args.once:
+        signal = engine.run_once()
+        if signal:
+            print(f"\n분석 결과: {signal.signal.value} (신뢰도: {signal.confidence:.1f})")
+            print(f"사유: {signal.reason}")
+            print(f"현재가: {signal.price:,.0f}원")
+        else:
+            print("\n분석 결과를 가져올 수 없습니다.")
+        return
+
+    try:
+        engine.start()
+    except KeyboardInterrupt:
+        print("\n프로그램을 종료합니다.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

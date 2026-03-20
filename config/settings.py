@@ -1,8 +1,7 @@
-"""거래소 간 재정거래 봇 설정"""
+"""삼성전자 자동매매 프로그램 설정"""
 
 import os
 from dataclasses import dataclass, field
-from typing import List
 
 from dotenv import load_dotenv
 
@@ -21,62 +20,87 @@ def _env_int(key: str, default: int = 0) -> int:
     return int(os.getenv(key, str(default)))
 
 
+def _env_bool(key: str, default: bool = True) -> bool:
+    val = os.getenv(key, str(default)).lower()
+    return val in ("true", "1", "yes")
+
+
 @dataclass
-class ExchangeKeys:
-    access_key: str = ""
-    secret_key: str = ""
+class KISConfig:
+    """한국투자증권 API 설정"""
+    app_key: str = ""
+    app_secret: str = ""
+    account_no: str = ""
+    account_product_code: str = "01"
+    is_paper: bool = True
+
+    def __post_init__(self):
+        self.app_key = _env("KIS_APP_KEY", self.app_key)
+        self.app_secret = _env("KIS_APP_SECRET", self.app_secret)
+        self.account_no = _env("KIS_ACCOUNT_NO", self.account_no)
+        self.account_product_code = _env("KIS_ACCOUNT_PRODUCT_CODE", self.account_product_code)
+        self.is_paper = _env_bool("KIS_IS_PAPER", self.is_paper)
 
     @property
     def is_valid(self) -> bool:
-        return bool(self.access_key and self.secret_key)
+        return bool(self.app_key and self.app_secret and self.account_no)
+
+    @property
+    def base_url(self) -> str:
+        if self.is_paper:
+            return "https://openapivts.koreainvestment.com:29443"
+        return "https://openapi.koreainvestment.com:9443"
 
 
 @dataclass
-class ArbitrageConfig:
-    target_symbols: List[str] = field(default_factory=lambda: ["USDT", "EURT", "CNHT", "XAUT"])
-    min_profit_pct: float = 0.5
-    max_slippage_pct: float = 0.3
-    max_trade_usdt: float = 1000.0
-    poll_interval_sec: int = 2
-    kimchi_buy_threshold: float = 1.0
-    kimchi_sell_threshold: float = 3.0
+class TradingConfig:
+    """매매 설정"""
+    stock_code: str = "005930"
+    stock_name: str = "삼성전자"
+    strategy: str = "combined"
+    max_buy_amount: int = 1_000_000
+    max_hold_qty: int = 100
+    stop_loss_pct: float = 3.0
+    take_profit_pct: float = 5.0
+    poll_interval_sec: int = 60
+    trading_start_time: str = "09:05"
+    trading_end_time: str = "15:15"
 
     def __post_init__(self):
-        symbols_str = _env("TARGET_SYMBOLS", "")
-        if symbols_str:
-            self.target_symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
-        self.min_profit_pct = _env_float("MIN_PROFIT_PCT", self.min_profit_pct)
-        self.max_slippage_pct = _env_float("MAX_SLIPPAGE_PCT", self.max_slippage_pct)
-        self.max_trade_usdt = _env_float("MAX_TRADE_USDT", self.max_trade_usdt)
+        self.stock_code = _env("STOCK_CODE", self.stock_code)
+        self.stock_name = _env("STOCK_NAME", self.stock_name)
+        self.strategy = _env("STRATEGY", self.strategy)
+        self.max_buy_amount = _env_int("MAX_BUY_AMOUNT", self.max_buy_amount)
+        self.max_hold_qty = _env_int("MAX_HOLD_QTY", self.max_hold_qty)
+        self.stop_loss_pct = _env_float("STOP_LOSS_PCT", self.stop_loss_pct)
+        self.take_profit_pct = _env_float("TAKE_PROFIT_PCT", self.take_profit_pct)
         self.poll_interval_sec = _env_int("POLL_INTERVAL_SEC", self.poll_interval_sec)
-        self.kimchi_buy_threshold = _env_float("KIMCHI_BUY_THRESHOLD", self.kimchi_buy_threshold)
-        self.kimchi_sell_threshold = _env_float("KIMCHI_SELL_THRESHOLD", self.kimchi_sell_threshold)
+        self.trading_start_time = _env("TRADING_START_TIME", self.trading_start_time)
+        self.trading_end_time = _env("TRADING_END_TIME", self.trading_end_time)
+
+
+@dataclass
+class TelegramConfig:
+    """텔레그램 알림 설정"""
+    token: str = ""
+    chat_id: str = ""
+
+    def __post_init__(self):
+        self.token = _env("TELEGRAM_TOKEN", self.token)
+        self.chat_id = _env("TELEGRAM_CHAT_ID", self.chat_id)
+
+    @property
+    def is_valid(self) -> bool:
+        return bool(self.token and self.chat_id)
 
 
 @dataclass
 class AppConfig:
-    upbit: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
-    bithumb: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
-    binance: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
-    bybit: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
-    bitfinex: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
-    arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
+    """전체 애플리케이션 설정"""
+    kis: KISConfig = field(default_factory=KISConfig)
+    trading: TradingConfig = field(default_factory=TradingConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     log_level: str = "INFO"
 
     def __post_init__(self):
-        self.upbit = ExchangeKeys(_env("UPBIT_ACCESS_KEY"), _env("UPBIT_SECRET_KEY"))
-        self.bithumb = ExchangeKeys(_env("BITHUMB_ACCESS_KEY"), _env("BITHUMB_SECRET_KEY"))
-        self.binance = ExchangeKeys(_env("BINANCE_ACCESS_KEY"), _env("BINANCE_SECRET_KEY"))
-        self.bybit = ExchangeKeys(_env("BYBIT_ACCESS_KEY"), _env("BYBIT_SECRET_KEY"))
-        self.bitfinex = ExchangeKeys(_env("BITFINEX_ACCESS_KEY"), _env("BITFINEX_SECRET_KEY"))
         self.log_level = _env("LOG_LEVEL", "INFO")
-
-    @property
-    def active_exchanges(self) -> List[str]:
-        """API 키가 설정된 거래소 목록"""
-        result = []
-        for name in ("upbit", "bithumb", "binance", "bybit", "bitfinex"):
-            keys: ExchangeKeys = getattr(self, name)
-            if keys.is_valid:
-                result.append(name)
-        return result

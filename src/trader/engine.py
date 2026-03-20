@@ -1,308 +1,240 @@
-"""단일 거래소(업비트) 기술적 분석 자동매매 엔진"""
+"""삼성전자 자동매매 엔진
+
+한국투자증권 API를 통해 삼성전자(005930) 자동매매를 수행.
+기술적 지표 기반 전략으로 매수/매도 신호를 생성하고 주문을 실행.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
-import signal
-import sys
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Optional
 
-import pyupbit
+import pandas as pd
 
+from config.settings import AppConfig
+from src.api.kis_client import KISClient, Position, OrderResult
 from src.indicators.technical import TechnicalIndicators
+from src.strategies import create_strategy
 from src.strategies.base import BaseStrategy, Signal, TradeSignal
-from src.strategies.rsi import RSIStrategy
-from src.strategies.macd import MACDStrategy
-from src.strategies.bollinger import BollingerStrategy
-from src.strategies.combined import CombinedStrategy
+from src.risk.manager import RiskManager, RiskConfig
 from src.utils.telegram_bot import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
-STRATEGY_MAP: Dict[str, type] = {
-    "rsi": RSIStrategy,
-    "macd": MACDStrategy,
-    "bollinger": BollingerStrategy,
-    "combined": CombinedStrategy,
-}
-
-
-@dataclass
-class Position:
-    ticker: str
-    avg_price: float = 0.0
-    volume: float = 0.0
-    entry_time: float = 0.0
-
-    @property
-    def is_holding(self) -> bool:
-        return self.volume > 0
-
-
-@dataclass
-class TradeLog:
-    timestamp: float
-    side: str
-    price: float
-    amount: float
-    reason: str
-    pnl_pct: float = 0.0
-
 
 class TraderEngine:
-    """
-    업비트 단일 거래소 자동매매.
+    """삼성전자 자동매매 엔진"""
 
-    사이클:
-      1. OHLCV 데이터 수집
-      2. 기술적 지표 계산
-      3. 전략 분석 → 매매 신호
-      4. 손절/익절 체크
-      5. 주문 실행
-    """
+    def __init__(self, config: AppConfig, dry_run: bool = True):
+        self.config = config
+        self.dry_run = dry_run
+        self.stock_code = config.trading.stock_code
+        self.stock_name = config.trading.stock_name
 
-    def __init__(
-        self,
-        access_key: str = "",
-        secret_key: str = "",
-        ticker: str = "KRW-BTC",
-        strategy_name: str = "combined",
-        interval: str = "minute60",
-        invest_ratio: float = 0.1,
-        max_invest_krw: float = 100_000,
-        stop_loss_pct: float = 3.0,
-        take_profit_pct: float = 5.0,
-        candle_count: int = 200,
-        telegram_token: str = "",
-        telegram_chat_id: str = "",
-    ):
-        self.ticker = ticker
-        self.interval = interval
-        self.invest_ratio = invest_ratio
-        self.max_invest_krw = max_invest_krw
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
-        self.candle_count = candle_count
-
-        self._upbit: Optional[pyupbit.Upbit] = None
-        if access_key and secret_key:
-            self._upbit = pyupbit.Upbit(access_key, secret_key)
-
+        self.kis = KISClient(config.kis)
         self.indicators = TechnicalIndicators()
-        self.strategy = self._make_strategy(strategy_name)
-        self.position = Position(ticker=ticker)
-        self.trade_logs: List[TradeLog] = []
-        self.running = False
-        self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
+        self.strategy: BaseStrategy = create_strategy(config.trading.strategy)
 
-        self._daily_trades = 0
-        self._max_daily_trades = 10
+        risk_config = RiskConfig(
+            max_buy_amount=config.trading.max_buy_amount,
+            max_hold_qty=config.trading.max_hold_qty,
+            stop_loss_pct=config.trading.stop_loss_pct,
+            take_profit_pct=config.trading.take_profit_pct,
+        )
+        self.risk = RiskManager(risk_config)
+        self.notifier = TelegramNotifier(config.telegram.token, config.telegram.chat_id)
 
-    def _make_strategy(self, name: str) -> BaseStrategy:
-        cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
-        return cls()
+        self._running = False
 
-    # ── 데이터 수집 ──
+    def start(self):
+        """자동매매 시작"""
+        mode = "모의투자" if self.dry_run else "실전투자"
+        logger.info("=" * 60)
+        logger.info("삼성전자 자동매매 시작")
+        logger.info("종목: %s (%s)", self.stock_name, self.stock_code)
+        logger.info("전략: %s", self.strategy.name)
+        logger.info("모드: %s", mode)
+        logger.info("매매주기: %d초", self.config.trading.poll_interval_sec)
+        logger.info("손절: %.1f%% / 익절: %.1f%%",
+                     self.config.trading.stop_loss_pct, self.config.trading.take_profit_pct)
+        logger.info("=" * 60)
 
-    def _fetch_ohlcv(self):
-        df = pyupbit.get_ohlcv(self.ticker, interval=self.interval, count=self.candle_count)
-        if df is not None and not df.empty:
-            df.columns = ["open", "high", "low", "close", "volume", "value"]
-            return df
-        return None
-
-    def _get_current_price(self) -> float:
-        p = pyupbit.get_current_price(self.ticker)
-        return float(p) if p else 0.0
-
-    def _get_krw_balance(self) -> float:
-        if not self._upbit:
-            return 0.0
-        b = self._upbit.get_balance("KRW")
-        return float(b) if b else 0.0
-
-    def _get_coin_balance(self) -> float:
-        if not self._upbit:
-            return 0.0
-        currency = self.ticker.split("-")[1]
-        b = self._upbit.get_balance(currency)
-        return float(b) if b else 0.0
-
-    def _get_avg_buy_price(self) -> float:
-        if not self._upbit:
-            return 0.0
-        currency = self.ticker.split("-")[1]
-        p = self._upbit.get_avg_buy_price(currency)
-        return float(p) if p else 0.0
-
-    # ── 매매 실행 ──
-
-    def _buy(self, reason: str) -> bool:
-        krw = self._get_krw_balance()
-        amount = min(krw * self.invest_ratio, self.max_invest_krw)
-        if amount < 5000:
-            logger.info("[매수 불가] 잔고 부족: %.0f원", krw)
-            return False
-
-        price = self._get_current_price()
-        if self._upbit:
-            result = self._upbit.buy_market_order(self.ticker, amount)
-            if result and "error" not in result:
-                self.position.avg_price = price
-                self.position.volume = amount / price
-                self.position.entry_time = time.time()
-                self._daily_trades += 1
-                self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
-                logger.info("[매수] %s | %.0f원 투자 | %s", self.ticker, amount, reason)
-                self.telegram.notify_buy(self.ticker, price, amount, reason)
-                return True
-            logger.error("[매수 실패] %s", result)
-        else:
-            logger.info("[시뮬] 매수: %.0f원 | 가격: %.0f | %s", amount, price, reason)
-            self.position.avg_price = price
-            self.position.volume = amount / price
-            self.position.entry_time = time.time()
-            self._daily_trades += 1
-            self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
-            self.telegram.notify_buy(self.ticker, price, amount, "[시뮬] " + reason)
-            return True
-        return False
-
-    def _sell(self, reason: str) -> bool:
-        volume = self._get_coin_balance() if self._upbit else self.position.volume
-        if volume <= 0:
-            return False
-
-        price = self._get_current_price()
-        pnl_pct = (price - self.position.avg_price) / self.position.avg_price * 100 if self.position.avg_price > 0 else 0
-
-        if self._upbit:
-            result = self._upbit.sell_market_order(self.ticker, volume)
-            if result and "error" not in result:
-                self._daily_trades += 1
-                self.trade_logs.append(TradeLog(time.time(), "SELL", price, volume * price, reason, pnl_pct))
-                logger.info("[매도] %s | 수익률: %+.2f%% | %s", self.ticker, pnl_pct, reason)
-                self.telegram.notify_sell(self.ticker, price, pnl_pct, reason)
-                self.position = Position(ticker=self.ticker)
-                return True
-            logger.error("[매도 실패] %s", result)
-        else:
-            self._daily_trades += 1
-            self.trade_logs.append(TradeLog(time.time(), "SELL", price, volume * price, reason, pnl_pct))
-            logger.info("[시뮬] 매도: 수익률 %+.2f%% | %s", pnl_pct, reason)
-            self.telegram.notify_sell(self.ticker, price, pnl_pct, "[시뮬] " + reason)
-            self.position = Position(ticker=self.ticker)
-            return True
-        return False
-
-    # ── 손절/익절 ──
-
-    def _check_stop_loss(self, current_price: float) -> bool:
-        if self.position.avg_price <= 0:
-            return False
-        loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
-        return loss >= self.stop_loss_pct
-
-    def _check_take_profit(self, current_price: float) -> bool:
-        if self.position.avg_price <= 0:
-            return False
-        gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
-        return gain >= self.take_profit_pct
-
-    # ── 메인 사이클 ──
-
-    def run_once(self):
-        """한 사이클 실행"""
-        df = self._fetch_ohlcv()
-        if df is None:
-            logger.warning("데이터 조회 실패")
-            return
-
-        df = self.indicators.add_all(df)
-        current_price = self._get_current_price()
-
-        # 포지션 동기화 (API 키 있을 때)
-        if self._upbit:
-            self.position.volume = self._get_coin_balance()
-            self.position.avg_price = self._get_avg_buy_price()
-
-        is_holding = self.position.volume > 0 and self.position.avg_price > 0
-
-        # 손절/익절 우선 체크
-        if is_holding:
-            if self._check_stop_loss(current_price):
-                loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
-                self.telegram.notify_stop_loss(self.ticker, current_price, loss)
-                self._sell("손절 (%.1f%%)" % loss)
-                return
-            if self._check_take_profit(current_price):
-                gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
-                self.telegram.notify_take_profit(self.ticker, current_price, gain)
-                self._sell("익절 (%.1f%%)" % gain)
-                return
-
-        # 전략 분석
-        sig = self.strategy.analyze(df)
-        self._log_status(current_price, sig, is_holding)
-
-        if not sig.is_actionable:
-            return
-        if self._daily_trades >= self._max_daily_trades:
-            logger.info("[제한] 일일 최대 거래 횟수 도달 (%d)", self._max_daily_trades)
-            return
-
-        if sig.signal == Signal.BUY and not is_holding:
-            self._buy(sig.reason)
-        elif sig.signal == Signal.SELL and is_holding:
-            self._sell(sig.reason)
-
-    def _log_status(self, price: float, sig: TradeSignal, holding: bool):
-        hold_str = ""
-        if holding and self.position.avg_price > 0:
-            pnl = (price - self.position.avg_price) / self.position.avg_price * 100
-            hold_str = " | 평단: %s | 수익률: %+.2f%%" % ("{:,.0f}".format(self.position.avg_price), pnl)
-        logger.info(
-            "[%s] 현재가: %s | 전략: %s | 신호: %s (%.0f%%)%s",
-            self.ticker, "{:,.0f}".format(price),
-            self.strategy.name, sig.signal.value,
-            sig.confidence * 100, hold_str,
+        self.notifier.notify_start(
+            f"{self.stock_name}({self.stock_code})",
+            self.strategy.name,
+            mode,
         )
 
-    def start(self, poll_sec: int = 60):
-        """무한 루프 실행"""
-        self.running = True
-
-        def _stop(signum, frame):
-            logger.info("종료 시그널 수신...")
-            self.running = False
-
-        signal.signal(signal.SIGINT, _stop)
-        signal.signal(signal.SIGTERM, _stop)
-
-        logger.info("=" * 55)
-        logger.info("  기술적 분석 자동매매 봇 시작")
-        logger.info("  대상: %s | 전략: %s", self.ticker, self.strategy.name)
-        logger.info("  투자비율: %.0f%% | 최대: %s원",
-                     self.invest_ratio * 100, "{:,.0f}".format(self.max_invest_krw))
-        logger.info("  손절: %.1f%% | 익절: %.1f%%", self.stop_loss_pct, self.take_profit_pct)
-        mode = "실거래" if self._upbit else "시뮬레이션"
-        logger.info("  주기: %d초 | API: %s", poll_sec, mode)
-        logger.info("=" * 55)
-        self.telegram.notify_start(self.ticker, self.strategy.name, mode)
-
-        while self.running:
+        self._running = True
+        while self._running:
             try:
-                self.run_once()
+                if self._is_trading_time():
+                    self.run_once()
+                else:
+                    logger.debug("장 시간 외 — 대기 중")
+            except KeyboardInterrupt:
+                logger.info("사용자 중단 요청")
+                break
             except Exception as e:
-                logger.error("사이클 오류: %s", e, exc_info=True)
+                logger.error("매매 루프 에러: %s", e, exc_info=True)
+                self.notifier.notify_error(str(e))
 
-            if self.running:
-                for _ in range(poll_sec):
-                    if not self.running:
-                        break
-                    time.sleep(1)
+            time.sleep(self.config.trading.poll_interval_sec)
 
-        logger.info("봇 종료 완료")
+        logger.info("자동매매 종료")
+
+    def stop(self):
+        self._running = False
+
+    def run_once(self) -> Optional[TradeSignal]:
+        """1회 매매 사이클 실행"""
+        df = self._fetch_ohlcv()
+        if df is None or df.empty or len(df) < 30:
+            logger.warning("OHLCV 데이터 부족 (%d행)", len(df) if df is not None else 0)
+            return None
+
+        df = self.indicators.add_all(df)
+        signal = self.strategy.analyze(df)
+        current_price = self._get_current_price()
+        position = self._get_position()
+
+        logger.info("[%s] 현재가: %s원 | 신호: %s (%.1f) | %s",
+                     self.stock_name,
+                     f"{current_price:,}" if current_price else "N/A",
+                     signal.signal.value,
+                     signal.confidence,
+                     signal.reason)
+
+        if position and current_price:
+            if self.risk.check_stop_loss(position.avg_price, current_price):
+                return self._execute_sell(position, current_price, "손절")
+            if self.risk.check_take_profit(position.avg_price, current_price):
+                return self._execute_sell(position, current_price, "익절")
+
+        if signal.is_actionable:
+            if signal.signal == Signal.BUY and current_price:
+                return self._execute_buy(signal, current_price, position)
+            elif signal.signal == Signal.SELL and position:
+                return self._execute_sell(position, current_price or 0, signal.reason)
+
+        return signal
+
+    def _execute_buy(self, signal: TradeSignal, price: int, position: Optional[Position]) -> TradeSignal:
+        current_qty = position.qty if position else 0
+        cash = self._get_cash_balance()
+
+        ok, reason = self.risk.can_buy(price, current_qty, cash)
+        if not ok:
+            logger.info("매수 스킵: %s", reason)
+            return TradeSignal(Signal.HOLD, 0.0, f"매수불가: {reason}", price)
+
+        qty = self.risk.calculate_buy_qty(price, cash)
+        if qty <= 0:
+            logger.info("매수 가능 수량 0")
+            return TradeSignal(Signal.HOLD, 0.0, "매수가능수량 0", price)
+
+        if self.dry_run:
+            logger.info("[모의] 매수: %s %d주 @ %s원 (사유: %s)",
+                       self.stock_name, qty, f"{price:,}", signal.reason)
+            self.risk.record_trade()
+            self.notifier.notify_buy(
+                f"{self.stock_name}({self.stock_code})",
+                price, price * qty, f"[모의] {signal.reason}",
+            )
+            return signal
+
+        result = self.kis.buy_market(self.stock_code, qty)
+        if result.success:
+            self.risk.record_trade()
+            self.notifier.notify_buy(
+                f"{self.stock_name}({self.stock_code})",
+                price, price * qty, signal.reason,
+            )
+            logger.info("매수 완료: %d주 (주문번호: %s)", qty, result.order_no)
+        else:
+            logger.warning("매수 실패: %s", result.message)
+
+        return signal
+
+    def _execute_sell(self, position: Position, price: int, reason: str) -> TradeSignal:
+        ok, msg = self.risk.can_sell(position.qty)
+        if not ok:
+            logger.info("매도 스킵: %s", msg)
+            return TradeSignal(Signal.HOLD, 0.0, f"매도불가: {msg}", price)
+
+        pnl_pct = self.risk.get_pnl_pct(position.avg_price, price)
+
+        if self.dry_run:
+            logger.info("[모의] 매도: %s %d주 @ %s원 (수익률: %+.2f%%, 사유: %s)",
+                       self.stock_name, position.qty, f"{price:,}", pnl_pct, reason)
+            pnl = (price - position.avg_price) * position.qty
+            self.risk.record_trade(pnl)
+            self.notifier.notify_sell(
+                f"{self.stock_name}({self.stock_code})",
+                price, pnl_pct, f"[모의] {reason}",
+            )
+            return TradeSignal(Signal.SELL, 1.0, reason, price)
+
+        result = self.kis.sell_market(self.stock_code, position.qty)
+        if result.success:
+            pnl = (price - position.avg_price) * position.qty
+            self.risk.record_trade(pnl)
+            self.notifier.notify_sell(
+                f"{self.stock_name}({self.stock_code})",
+                price, pnl_pct, reason,
+            )
+            logger.info("매도 완료: %d주 (수익률: %+.2f%%, 주문번호: %s)",
+                       position.qty, pnl_pct, result.order_no)
+        else:
+            logger.warning("매도 실패: %s", result.message)
+
+        return TradeSignal(Signal.SELL, 1.0, reason, price)
+
+    def _fetch_ohlcv(self) -> Optional[pd.DataFrame]:
+        try:
+            return self.kis.get_daily_ohlcv(self.stock_code, count=100)
+        except Exception as e:
+            logger.error("OHLCV 조회 실패: %s", e)
+            return None
+
+    def _get_current_price(self) -> Optional[int]:
+        try:
+            sp = self.kis.get_current_price(self.stock_code)
+            return sp.price
+        except Exception as e:
+            logger.error("현재가 조회 실패: %s", e)
+            return None
+
+    def _get_position(self) -> Optional[Position]:
+        try:
+            return self.kis.get_stock_position(self.stock_code)
+        except Exception as e:
+            logger.error("잔고 조회 실패: %s", e)
+            return None
+
+    def _get_cash_balance(self) -> int:
+        try:
+            return self.kis.get_cash_balance()
+        except Exception as e:
+            logger.error("예수금 조회 실패: %s", e)
+            return 0
+
+    def _is_trading_time(self) -> bool:
+        """장 시간인지 확인 (평일 09:00~15:30)"""
+        now = datetime.now()
+        if now.weekday() >= 5:
+            return False
+
+        start_parts = self.config.trading.trading_start_time.split(":")
+        end_parts = self.config.trading.trading_end_time.split(":")
+
+        start_hour, start_min = int(start_parts[0]), int(start_parts[1])
+        end_hour, end_min = int(end_parts[0]), int(end_parts[1])
+
+        current_minutes = now.hour * 60 + now.minute
+        start_minutes = start_hour * 60 + start_min
+        end_minutes = end_hour * 60 + end_min
+
+        return start_minutes <= current_minutes <= end_minutes

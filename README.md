@@ -1,282 +1,177 @@
-# 거래소 간 재정거래 자동매매 봇 (Crypto Arbitrage Bot)
+# 삼성전자 자동매매 프로그램
 
-전 세계 거래소 간의 **USDT/코인 가격 차이**를 실시간으로 분석하여 자동으로 매매 수익을 내도록 설계된 재정거래(아비트라지) 자동매매 솔루션입니다.
+한국투자증권(KIS) Open API를 활용한 삼성전자 주식 자동매매 프로그램입니다.
 
-## 핵심 기능
+기술적 지표 기반 매매 전략으로 자동 매수/매도를 수행하며, 리스크 관리 및 텔레그램 알림을 지원합니다.
 
-- **김치프리미엄 모니터링**: 한국 거래소(업비트, 빗썸) vs 해외 거래소(바이낸스, 바이비트) 간 가격 차이 실시간 추적
-- **크로스 거래소 재정거래**: 해외 거래소 간 가격 차이 탐지 및 자동 매매
-- **실시간 환율 반영**: KRW/USDT 환율을 자동 조회하여 정확한 가격 비교
-- **동시 주문 실행**: 매수/매도를 병렬 실행하여 슬리피지 최소화
-- **리스크 관리**: 최소 수익률 필터, 슬리피지 보정, 거래량 검증, 쿨다운
-- **실시간 대시보드**: 터미널에서 가격/기회/김프를 한눈에 모니터링
+## 주요 기능
 
-## 지원 거래소
-
-| 거래소 | 유형 | 기준 통화 | 수수료 |
-|--------|------|-----------|--------|
-| **업비트 (Upbit)** | 한국 | KRW | 0.05% |
-| **빗썸 (Bithumb)** | 한국 | KRW | 0.25% |
-| **바이낸스 (Binance)** | 해외 | USDT | 0.1% |
-| **바이비트 (Bybit)** | 해외 | USDT | 0.1% |
+- **5가지 매매 전략**: RSI, MACD, 볼린저 밴드, 이동평균 크로스, 복합 전략
+- **자동 손절/익절**: 설정한 비율에 도달하면 자동 매도
+- **리스크 관리**: 최대 매수금액, 보유수량 제한, 일일 손실 한도
+- **모의투자/실전투자**: 한국투자증권 모의투자 환경에서 안전하게 테스트 가능
+- **텔레그램 알림**: 매수/매도/손절/익절 시 실시간 알림
 
 ## 프로젝트 구조
 
 ```
-tradingbot/
+├── run_trader.py          # 메인 실행 파일
 ├── config/
-│   └── settings.py              # 멀티 거래소 설정 관리
+│   └── settings.py        # 설정 관리
 ├── src/
-│   ├── exchanges/
-│   │   ├── base_exchange.py     # 거래소 추상 인터페이스
-│   │   ├── upbit_exchange.py    # 업비트 전용 클라이언트
-│   │   ├── ccxt_exchange.py     # ccxt 기반 범용 클라이언트
-│   │   └── exchange_factory.py  # 거래소 팩토리
-│   ├── monitor/
-│   │   ├── fx_rate.py           # KRW/USDT 환율 조회
-│   │   └── price_monitor.py     # 멀티 거래소 동시 가격 조회
-│   ├── arbitrage/
-│   │   └── detector.py          # 재정거래 기회 탐지 엔진
-│   ├── execution/
-│   │   └── engine.py            # 동시 주문 실행 엔진
+│   ├── api/
+│   │   └── kis_client.py  # 한국투자증권 API 클라이언트
+│   ├── trader/
+│   │   └── engine.py      # 자동매매 엔진
+│   ├── strategies/        # 매매 전략
+│   │   ├── base.py        # 전략 인터페이스
+│   │   ├── rsi.py         # RSI 전략
+│   │   ├── macd.py        # MACD 전략
+│   │   ├── bollinger.py   # 볼린저 밴드 전략
+│   │   ├── ma_cross.py    # 이동평균 크로스 전략
+│   │   └── combined.py    # 복합 전략
+│   ├── indicators/
+│   │   └── technical.py   # 기술적 지표 계산
 │   ├── risk/
-│   │   └── manager.py           # 리스크 관리
-│   ├── utils/
-│   │   ├── logger.py            # 로깅
-│   │   └── dashboard.py         # 콘솔 대시보드
-│   └── main.py                  # 메인 봇 엔진
-├── tests/                       # 테스트 (40개)
-├── requirements.txt
-├── .env.example
-└── README.md
+│   │   └── manager.py     # 리스크 관리
+│   └── utils/
+│       ├── logger.py      # 로깅
+│       └── telegram_bot.py # 텔레그램 알림
+├── tests/                 # 테스트
+├── .env.example           # 환경변수 예시
+└── requirements.txt       # 의존성
 ```
 
-## Ubuntu 설치 가이드 (처음부터)
+## 설치
 
-우분투만 설치된 상태에서 시작하는 전체 과정입니다.
-
-### Step 1. 시스템 패키지 업데이트
-
-```bash
-sudo apt update && sudo apt upgrade -y
-```
-
-### Step 2. Python 3 및 pip 설치
-
-```bash
-sudo apt install -y python3 python3-pip python3-venv git
-```
-
-설치 확인:
-
-```bash
-python3 --version   # Python 3.10 이상 권장
-pip3 --version
-```
-
-### Step 3. 프로젝트 다운로드
-
-```bash
-cd ~
-git clone https://github.com/boramee/tradingbot.git
-cd tradingbot
-```
-
-### Step 4. 가상환경 생성 및 활성화
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-> 이후 터미널을 새로 열 때마다 `source ~/tradingbot/venv/bin/activate` 실행 필요
-
-### Step 5. 파이썬 패키지 설치
+### 1. 의존성 설치
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 6. 환경 설정 파일 생성
+### 2. 한국투자증권 API 설정
+
+1. [KIS Developers](https://apiportal.koreainvestment.com)에 가입
+2. 앱 키(App Key) 및 앱 시크릿(App Secret) 발급
+3. 모의투자 계좌 개설 (실전 전 테스트용)
+
+### 3. 환경변수 설정
 
 ```bash
 cp .env.example .env
-nano .env
 ```
 
-`.env` 파일에 사용할 거래소의 API 키를 입력합니다:
+`.env` 파일을 열어 API 키와 계좌 정보를 입력합니다:
 
 ```env
-# 업비트 (https://upbit.com/mypage/open_api_management 에서 발급)
-UPBIT_ACCESS_KEY=발급받은_access_key
-UPBIT_SECRET_KEY=발급받은_secret_key
-
-# 바이낸스 (https://www.binance.com/en/my/settings/api-management 에서 발급)
-BINANCE_ACCESS_KEY=발급받은_access_key
-BINANCE_SECRET_KEY=발급받은_secret_key
+KIS_APP_KEY=발급받은_앱키
+KIS_APP_SECRET=발급받은_시크릿
+KIS_ACCOUNT_NO=계좌번호8자리-상품코드2자리
+KIS_IS_PAPER=true
 ```
-
-> `nano` 편집기: 수정 후 `Ctrl+O` → Enter(저장) → `Ctrl+X`(나가기)
->
-> API 키 없이도 시세 조회 및 김치프리미엄 모니터링은 가능합니다.
-
-### Step 7. 테스트로 정상 설치 확인
-
-```bash
-python3 -m pytest tests/ -v
-```
-
-40개 테스트가 모두 `PASSED`로 나오면 정상입니다.
-
-### Step 8. 봇 실행
-
-```bash
-# 시뮬레이션 모드로 먼저 테스트 (실제 주문 없음)
-python3 -m src.main
-
-# 문제 없으면 실거래 모드
-python3 -m src.main --live
-```
-
-### (선택) 백그라운드에서 24시간 실행
-
-```bash
-# nohup으로 백그라운드 실행
-nohup python3 -m src.main --no-dashboard > bot.log 2>&1 &
-
-# 로그 실시간 확인
-tail -f bot.log
-
-# 봇 종료
-kill $(pgrep -f "src.main")
-```
-
-또는 `systemd` 서비스로 등록하면 서버 재시작 시 자동 실행됩니다:
-
-```bash
-sudo nano /etc/systemd/system/tradingbot.service
-```
-
-아래 내용을 붙여넣기 (`your_username`을 실제 사용자명으로 변경):
-
-```ini
-[Unit]
-Description=Crypto Arbitrage Trading Bot
-After=network.target
-
-[Service]
-Type=simple
-User=your_username
-WorkingDirectory=/home/your_username/tradingbot
-ExecStart=/home/your_username/tradingbot/venv/bin/python3 -m src.main --no-dashboard
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-서비스 등록 및 실행:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable tradingbot    # 부팅 시 자동 시작
-sudo systemctl start tradingbot     # 지금 바로 시작
-sudo systemctl status tradingbot    # 상태 확인
-sudo journalctl -u tradingbot -f    # 로그 실시간 확인
-```
-
----
-
-## 설정 상세
-
-### API 키 설정 (`.env`)
-
-| 거래소 | 키 발급 URL |
-|--------|------------|
-| 업비트 | https://upbit.com/mypage/open_api_management |
-| 빗썸 | https://www.bithumb.com/api_support/management_api |
-| 바이낸스 | https://www.binance.com/en/my/settings/api-management |
-| 바이비트 | https://www.bybit.com/app/user/api-management |
-
-### 매매 설정 (`.env`)
-
-| 설정 | 설명 | 기본값 |
-|------|------|--------|
-| `TARGET_SYMBOLS` | 모니터링 코인 | `BTC,ETH,XRP,SOL,DOGE` |
-| `MIN_PROFIT_PCT` | 최소 순수익률 (%) | `0.5` |
-| `MAX_SLIPPAGE_PCT` | 슬리피지 허용 범위 (%) | `0.3` |
-| `MAX_TRADE_USDT` | 1회 최대 거래 금액 (USDT) | `1000` |
-| `POLL_INTERVAL_SEC` | 가격 조회 주기 (초) | `2` |
-| `KIMCHI_BUY_THRESHOLD` | 김프 매수 기준 (%) | `1.0` |
-| `KIMCHI_SELL_THRESHOLD` | 김프 매도 기준 (%) | `3.0` |
 
 ## 사용법
 
-### 모니터링 모드 (시뮬레이션, 기본)
+### 모의투자 (기본)
 
 ```bash
-python3 -m src.main
+python run_trader.py
 ```
 
-### 실거래 모드
+### 실전투자
 
 ```bash
-python3 -m src.main --live
+python run_trader.py --live
 ```
 
-> 실거래 모드는 5초 대기 후 시작되며, 실제 자금으로 주문이 실행됩니다.
+> ⚠️ 실전투자는 실제 돈이 사용됩니다. 반드시 모의투자로 충분히 테스트한 후 사용하세요.
 
-### 대시보드 없이 로그만 출력
+### 전략 선택
 
 ```bash
-python3 -m src.main --no-dashboard
+# RSI (과매수/과매도 기반)
+python run_trader.py --strategy rsi
+
+# MACD (골든크로스/데드크로스 기반)
+python run_trader.py --strategy macd
+
+# 볼린저 밴드 (밴드 이탈/복귀 기반)
+python run_trader.py --strategy bollinger
+
+# 이동평균 크로스 (5일/20일/60일 이평선)
+python run_trader.py --strategy ma_cross
+
+# 복합 전략 (모든 지표 가중 합산, 기본값)
+python run_trader.py --strategy combined
 ```
 
-### 테스트 실행
+### 기타 옵션
 
 ```bash
-python3 -m pytest tests/ -v
+# 1회 분석만 실행 (매매 안함)
+python run_trader.py --once
+
+# 다른 종목 매매 (삼성전자우)
+python run_trader.py --code 005935 --name 삼성전자우
+
+# 매매 주기 30초, 손절 2%, 익절 7%
+python run_trader.py --interval 30 --stop-loss 2.0 --take-profit 7.0
+
+# 1회 최대 매수금액 200만원
+python run_trader.py --max-amount 2000000
 ```
 
-## 작동 원리
+## 매매 전략 상세
 
-### 1. 가격 수집
-- 4개 거래소에서 동시에(ThreadPool) 가격 조회
-- KRW 가격은 실시간 환율로 USDT로 변환하여 정규화
+### RSI (Relative Strength Index)
+- RSI 30 이하 → 과매도 → **매수**
+- RSI 70 이상 → 과매수 → **매도**
 
-### 2. 재정거래 기회 탐지
+### MACD (Moving Average Convergence Divergence)
+- MACD 히스토그램 음→양 전환 (골든크로스) → **매수**
+- MACD 히스토그램 양→음 전환 (데드크로스) → **매도**
+
+### 볼린저 밴드
+- %B 0.05 이하 (하단 밴드 근접) → **매수**
+- %B 0.95 이상 (상단 밴드 근접) → **매도**
+
+### 이동평균 크로스
+- 5일선이 20일선 상향 돌파 (골든크로스) → **매수**
+- 5일선이 20일선 하향 돌파 (데드크로스) → **매도**
+- 60일선으로 장기 추세 확인
+
+### 복합 전략 (기본)
+RSI(25%) + MACD(30%) + 볼린저(20%) + 이동평균(25%)을 가중 합산하여 매매 판단.  
+거래량이 평균 이하일 경우 신호 강도를 낮춤.
+
+## 리스크 관리
+
+| 항목 | 기본값 | 설정 |
+|------|--------|------|
+| 1회 최대 매수금액 | 100만원 | `MAX_BUY_AMOUNT` |
+| 최대 보유수량 | 100주 | `MAX_HOLD_QTY` |
+| 손절 비율 | 3% | `STOP_LOSS_PCT` |
+| 익절 비율 | 5% | `TAKE_PROFIT_PCT` |
+| 매매 쿨다운 | 5분 | 코드 내 설정 |
+| 일일 최대 손실 | 50만원 | 코드 내 설정 |
+
+## 텔레그램 알림 설정
+
+1. Telegram에서 [@BotFather](https://t.me/BotFather)에게 `/newbot` 명령으로 봇 생성
+2. 발급받은 토큰을 `.env`의 `TELEGRAM_TOKEN`에 입력
+3. 봇에게 아무 메시지를 보낸 후 `https://api.telegram.org/bot<TOKEN>/getUpdates`에서 `chat_id` 확인
+4. `.env`의 `TELEGRAM_CHAT_ID`에 입력
+
+## 테스트
+
+```bash
+pytest tests/ -v
 ```
-스프레드(%) = (매도거래소 매수호가 - 매수거래소 매도호가) / 매수거래소 매도호가 × 100
-순수익(%)   = 스프레드(%) - 양쪽 수수료(%)
-```
 
-### 3. 리스크 검증
-- 순수익률 > 최소 기준(0.5%)인지 확인
-- 슬리피지 감안 후에도 수익인지 확인
-- 거래량이 충분한지 확인
-- 동시 거래 한도, 쿨다운 확인
+## 주의사항
 
-### 4. 동시 실행
-- 매수/매도 거래소에 ThreadPool로 동시 주문
-- 한쪽만 체결된 경우 CRITICAL 로그 + 수동 확인 알림
-
-## 김치프리미엄 활용 예시
-
-```
-업비트 BTC: 136,350,000 KRW  (환율 1350 → 약 101,000 USDT)
-바이낸스 BTC: 100,000 USDT
-
-김치프리미엄 = (101,000 - 100,000) / 100,000 × 100 = +1.0%
-```
-
-- 김프 1% 이하: 바이낸스에서 매수 → 업비트로 전송 → 업비트에서 매도 고려
-- 김프 3% 이상: 업비트에서 매도 → 바이낸스에서 재매수 고려
-
-## 주의 사항
-
-- **투자 위험**: 재정거래에도 슬리피지, 전송 지연, 가격 변동 리스크가 있습니다.
-- **법적 고려**: 한국 거래소와 해외 거래소 간 자금 이동 시 관련 법규를 확인하세요.
-- **API 키 보안**: `.env` 파일을 절대 Git에 커밋하지 마세요.
-- **소액 테스트**: 시뮬레이션 모드로 충분히 테스트한 후 소액으로 시작하세요.
-- **네트워크**: 거래소 API 호출 시 네트워크 지연으로 가격이 변동될 수 있습니다.
+- 이 프로그램은 투자 참고용이며, 투자 손실에 대한 책임은 사용자에게 있습니다
+- 반드시 모의투자로 충분한 테스트를 거친 후 실전투자에 사용하세요
+- 한국 주식시장 거래시간(09:00~15:30) 외에는 주문이 체결되지 않습니다
+- API 호출 횟수 제한에 주의하세요 (초당 20회 이내 권장)

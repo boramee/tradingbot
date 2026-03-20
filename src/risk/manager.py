@@ -1,128 +1,128 @@
-"""재정거래 전용 리스크 관리"""
+"""리스크 관리 모듈
+
+주요 기능:
+  - 최대 보유 수량 제한
+  - 최대 매수 금액 제한
+  - 손절 / 익절 판단
+  - 일일 손실 한도 관리
+  - 매매 간 쿨다운 적용
+"""
 
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
-
-from config.settings import ArbitrageConfig
-from src.arbitrage.detector import ArbitrageOpportunity
+from datetime import datetime, timedelta
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TradeRecord:
-    timestamp: float
-    symbol: str
-    buy_exchange: str
-    sell_exchange: str
-    profit_pct: float
-    amount_usdt: float
+class RiskConfig:
+    max_buy_amount: int = 1_000_000
+    max_hold_qty: int = 100
+    stop_loss_pct: float = 3.0
+    take_profit_pct: float = 5.0
+    max_daily_loss: int = 500_000
+    cooldown_minutes: int = 5
+
+
+@dataclass
+class RiskState:
+    daily_pnl: float = 0.0
+    trade_count: int = 0
+    last_trade_time: Optional[datetime] = None
+    daily_reset_date: str = ""
+
+    def reset_if_new_day(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_reset_date != today:
+            self.daily_pnl = 0.0
+            self.trade_count = 0
+            self.daily_reset_date = today
 
 
 class RiskManager:
-    """
-    재정거래 리스크 관리:
-    1. 최소 순수익률 필터
-    2. 슬리피지 보정
-    3. 거래량 충분성 검증
-    4. 일일 손실 한도
-    5. 동시 거래 수 제한
-    6. 쿨다운 (같은 페어 연속 거래 방지)
-    """
+    """매매 리스크 관리"""
 
-    MAX_CONCURRENT = 3
-    COOLDOWN_SEC = 30
-    MAX_DAILY_LOSS_USDT = 50.0
-
-    def __init__(self, config: ArbitrageConfig):
+    def __init__(self, config: RiskConfig):
         self.config = config
-        self._active_trades: int = 0
-        self._trade_history: List[TradeRecord] = []
-        self._last_trade_time: Dict[str, float] = {}  # "BTC:upbit→binance" → timestamp
-        self._daily_pnl_usdt: float = 0.0
-        self._pnl_date: str = ""
+        self.state = RiskState()
 
-    def validate_opportunity(self, opp: ArbitrageOpportunity) -> tuple[bool, str]:
-        """기회를 실행해도 되는지 리스크 관점에서 검증"""
-        self._reset_daily_pnl_if_needed()
+    def can_buy(self, price: int, current_qty: int, cash_balance: int) -> tuple[bool, str]:
+        """매수 가능 여부 판단"""
+        self.state.reset_if_new_day()
 
-        if opp.net_profit_pct < self.config.min_profit_pct:
-            return False, f"순수익률 부족 ({opp.net_profit_pct:.3f}% < {self.config.min_profit_pct}%)"
+        if current_qty >= self.config.max_hold_qty:
+            return False, f"최대 보유수량 초과 ({current_qty}/{self.config.max_hold_qty})"
 
-        slippage_adjusted = opp.net_profit_pct - self.config.max_slippage_pct
-        if slippage_adjusted <= 0:
-            return False, f"슬리피지 감안 시 수익 불가 ({slippage_adjusted:.3f}%)"
+        if price > cash_balance:
+            return False, f"예수금 부족 (필요: {price:,}원, 보유: {cash_balance:,}원)"
 
-        if opp.buy_volume < 10 or opp.sell_volume < 10:
-            return False, "거래량 부족 (24h 거래량 < 10)"
+        if price > self.config.max_buy_amount:
+            return False, f"1회 최대 매수금액 초과 ({price:,} > {self.config.max_buy_amount:,})"
 
-        if self._active_trades >= self.MAX_CONCURRENT:
-            return False, f"동시 거래 한도 초과 ({self._active_trades}/{self.MAX_CONCURRENT})"
+        if abs(self.state.daily_pnl) >= self.config.max_daily_loss:
+            return False, f"일일 최대 손실 도달 ({self.state.daily_pnl:,.0f}원)"
 
-        trade_key = f"{opp.symbol}:{opp.buy_exchange}→{opp.sell_exchange}"
-        last_time = self._last_trade_time.get(trade_key, 0)
-        if time.time() - last_time < self.COOLDOWN_SEC:
-            remaining = self.COOLDOWN_SEC - (time.time() - last_time)
-            return False, f"쿨다운 중 ({remaining:.0f}초 남음)"
+        if not self._check_cooldown():
+            return False, "쿨다운 시간 미경과"
 
-        if self._daily_pnl_usdt < -self.MAX_DAILY_LOSS_USDT:
-            return False, f"일일 손실 한도 초과 ({self._daily_pnl_usdt:.2f} USDT)"
+        return True, "매수 가능"
 
-        return True, "검증 통과"
+    def can_sell(self, current_qty: int) -> tuple[bool, str]:
+        """매도 가능 여부 판단"""
+        if current_qty <= 0:
+            return False, "보유 수량 없음"
 
-    def calculate_trade_amount(self, opp: ArbitrageOpportunity) -> float:
-        """리스크를 고려한 거래 금액(USDT) 계산"""
-        base_amount = self.config.max_trade_usdt
+        if not self._check_cooldown():
+            return False, "쿨다운 시간 미경과"
 
-        if opp.net_profit_pct < self.config.min_profit_pct * 2:
-            base_amount *= 0.5
+        return True, "매도 가능"
 
-        max_by_volume = min(opp.buy_volume, opp.sell_volume) * opp.buy_price_usdt * 0.01
-        amount = min(base_amount, max_by_volume)
+    def check_stop_loss(self, avg_price: float, current_price: int) -> bool:
+        """손절 조건 확인"""
+        if avg_price <= 0:
+            return False
+        loss_pct = (avg_price - current_price) / avg_price * 100
+        if loss_pct >= self.config.stop_loss_pct:
+            logger.warning("손절 신호: 손실률 %.2f%% (기준: %.1f%%)", loss_pct, self.config.stop_loss_pct)
+            return True
+        return False
 
-        return max(amount, 0)
+    def check_take_profit(self, avg_price: float, current_price: int) -> bool:
+        """익절 조건 확인"""
+        if avg_price <= 0:
+            return False
+        gain_pct = (current_price - avg_price) / avg_price * 100
+        if gain_pct >= self.config.take_profit_pct:
+            logger.info("익절 신호: 수익률 %.2f%% (기준: %.1f%%)", gain_pct, self.config.take_profit_pct)
+            return True
+        return False
 
-    def on_trade_start(self, opp: ArbitrageOpportunity):
-        """거래 시작 기록"""
-        self._active_trades += 1
-        trade_key = f"{opp.symbol}:{opp.buy_exchange}→{opp.sell_exchange}"
-        self._last_trade_time[trade_key] = time.time()
+    def calculate_buy_qty(self, price: int, cash_balance: int) -> int:
+        """매수 가능 수량 계산"""
+        max_amount = min(self.config.max_buy_amount, cash_balance)
+        qty = max_amount // price
+        remaining = self.config.max_hold_qty
+        return min(qty, remaining)
 
-    def on_trade_complete(self, opp: ArbitrageOpportunity, actual_profit_usdt: float):
-        """거래 완료 기록"""
-        self._active_trades = max(0, self._active_trades - 1)
-        self._daily_pnl_usdt += actual_profit_usdt
-        self._trade_history.append(TradeRecord(
-            timestamp=time.time(),
-            symbol=opp.symbol,
-            buy_exchange=opp.buy_exchange,
-            sell_exchange=opp.sell_exchange,
-            profit_pct=opp.net_profit_pct,
-            amount_usdt=actual_profit_usdt,
-        ))
-        logger.info("거래 완료: %s (수익: %.4f USDT, 일일 누적: %.4f USDT)",
-                     opp.symbol, actual_profit_usdt, self._daily_pnl_usdt)
+    def record_trade(self, pnl: float = 0.0):
+        """매매 기록"""
+        self.state.reset_if_new_day()
+        self.state.daily_pnl += pnl
+        self.state.trade_count += 1
+        self.state.last_trade_time = datetime.now()
 
-    def _reset_daily_pnl_if_needed(self):
-        import datetime
-        today = datetime.date.today().isoformat()
-        if self._pnl_date != today:
-            if self._pnl_date:
-                logger.info("일일 PnL 초기화 (전일: %.4f USDT)", self._daily_pnl_usdt)
-            self._daily_pnl_usdt = 0.0
-            self._pnl_date = today
+    def _check_cooldown(self) -> bool:
+        if self.state.last_trade_time is None:
+            return True
+        elapsed = datetime.now() - self.state.last_trade_time
+        return elapsed >= timedelta(minutes=self.config.cooldown_minutes)
 
-    @property
-    def daily_pnl(self) -> float:
-        return self._daily_pnl_usdt
-
-    @property
-    def trade_count_today(self) -> int:
-        import datetime
-        today = datetime.date.today().isoformat()
-        cutoff = time.mktime(datetime.date.today().timetuple())
-        return sum(1 for t in self._trade_history if t.timestamp >= cutoff)
+    def get_pnl_pct(self, avg_price: float, current_price: int) -> float:
+        """현재 수익률 계산"""
+        if avg_price <= 0:
+            return 0.0
+        return (current_price - avg_price) / avg_price * 100

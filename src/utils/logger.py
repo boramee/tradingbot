@@ -24,12 +24,12 @@ def setup_logger(level: str = "INFO", log_dir: str = "logs") -> logging.Logger:
     console.setFormatter(fmt)
     root.addHandler(console)
 
-    log_file = os.path.join(log_dir, f"arbitrage_{datetime.now():%Y%m%d}.log")
+    log_file = os.path.join(log_dir, f"samsung_trader_{datetime.now():%Y%m%d}.log")
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
-    for name in ("urllib3", "requests", "ccxt", "ccxt.base.exchange"):
+    for name in ("urllib3", "requests"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
     return root
