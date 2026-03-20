@@ -1,78 +1,80 @@
+"""거래소 간 재정거래 봇 설정"""
+
 import os
 from dataclasses import dataclass, field
+from typing import List
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
+def _env(key: str, default: str = "") -> str:
+    return os.getenv(key, default)
+
+
+def _env_float(key: str, default: float = 0.0) -> float:
+    return float(os.getenv(key, str(default)))
+
+
+def _env_int(key: str, default: int = 0) -> int:
+    return int(os.getenv(key, str(default)))
+
+
 @dataclass
-class ExchangeConfig:
+class ExchangeKeys:
     access_key: str = ""
     secret_key: str = ""
 
-    def __post_init__(self):
-        self.access_key = os.getenv("UPBIT_ACCESS_KEY", "")
-        self.secret_key = os.getenv("UPBIT_SECRET_KEY", "")
-
     @property
     def is_valid(self) -> bool:
-        return bool(self.access_key and self.secret_key
-                     and self.access_key != "your_access_key_here")
+        return bool(self.access_key and self.secret_key)
 
 
 @dataclass
-class TradingConfig:
-    ticker: str = "KRW-BTC"
-    investment_ratio: float = 0.1
-    max_investment_krw: float = 100000
-    strategy: str = "combined"
-    interval: str = "minute60"
-    candle_count: int = 200
+class ArbitrageConfig:
+    target_symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "XRP", "SOL", "DOGE"])
+    min_profit_pct: float = 0.5
+    max_slippage_pct: float = 0.3
+    max_trade_usdt: float = 1000.0
+    poll_interval_sec: int = 2
+    kimchi_buy_threshold: float = 1.0
+    kimchi_sell_threshold: float = 3.0
 
     def __post_init__(self):
-        self.ticker = os.getenv("TICKER", self.ticker)
-        self.investment_ratio = float(os.getenv("INVESTMENT_RATIO", self.investment_ratio))
-        self.max_investment_krw = float(os.getenv("MAX_INVESTMENT_KRW", self.max_investment_krw))
-        self.strategy = os.getenv("STRATEGY", self.strategy)
-
-
-@dataclass
-class RiskConfig:
-    stop_loss_pct: float = 3.0
-    take_profit_pct: float = 5.0
-    max_daily_trades: int = 10
-    max_position_ratio: float = 0.3
-
-    def __post_init__(self):
-        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", self.stop_loss_pct))
-        self.take_profit_pct = float(os.getenv("TAKE_PROFIT_PCT", self.take_profit_pct))
-        self.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", self.max_daily_trades))
-
-
-@dataclass
-class IndicatorConfig:
-    rsi_period: int = 14
-    rsi_oversold: float = 30.0
-    rsi_overbought: float = 70.0
-
-    macd_fast: int = 12
-    macd_slow: int = 26
-    macd_signal: int = 9
-
-    bb_period: int = 20
-    bb_std: float = 2.0
-
-    ma_short: int = 5
-    ma_long: int = 20
+        symbols_str = _env("TARGET_SYMBOLS", "")
+        if symbols_str:
+            self.target_symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
+        self.min_profit_pct = _env_float("MIN_PROFIT_PCT", self.min_profit_pct)
+        self.max_slippage_pct = _env_float("MAX_SLIPPAGE_PCT", self.max_slippage_pct)
+        self.max_trade_usdt = _env_float("MAX_TRADE_USDT", self.max_trade_usdt)
+        self.poll_interval_sec = _env_int("POLL_INTERVAL_SEC", self.poll_interval_sec)
+        self.kimchi_buy_threshold = _env_float("KIMCHI_BUY_THRESHOLD", self.kimchi_buy_threshold)
+        self.kimchi_sell_threshold = _env_float("KIMCHI_SELL_THRESHOLD", self.kimchi_sell_threshold)
 
 
 @dataclass
 class AppConfig:
-    exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
-    trading: TradingConfig = field(default_factory=TradingConfig)
-    risk: RiskConfig = field(default_factory=RiskConfig)
-    indicator: IndicatorConfig = field(default_factory=IndicatorConfig)
+    upbit: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
+    bithumb: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
+    binance: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
+    bybit: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
+    arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
     log_level: str = "INFO"
 
     def __post_init__(self):
-        self.log_level = os.getenv("LOG_LEVEL", self.log_level)
+        self.upbit = ExchangeKeys(_env("UPBIT_ACCESS_KEY"), _env("UPBIT_SECRET_KEY"))
+        self.bithumb = ExchangeKeys(_env("BITHUMB_ACCESS_KEY"), _env("BITHUMB_SECRET_KEY"))
+        self.binance = ExchangeKeys(_env("BINANCE_ACCESS_KEY"), _env("BINANCE_SECRET_KEY"))
+        self.bybit = ExchangeKeys(_env("BYBIT_ACCESS_KEY"), _env("BYBIT_SECRET_KEY"))
+        self.log_level = _env("LOG_LEVEL", "INFO")
+
+    @property
+    def active_exchanges(self) -> List[str]:
+        """API 키가 설정된 거래소 목록"""
+        result = []
+        for name in ("upbit", "bithumb", "binance", "bybit"):
+            keys: ExchangeKeys = getattr(self, name)
+            if keys.is_valid:
+                result.append(name)
+        return result

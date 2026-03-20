@@ -1,192 +1,140 @@
-"""자동매매 봇 메인 실행 모듈"""
+"""거래소 간 재정거래(아비트라지) 자동매매 봇 메인 모듈"""
 
 import logging
 import signal
 import sys
 import time
-from typing import Optional
 
 from config.settings import AppConfig
-from src.exchange.upbit_client import UpbitClient
-from src.indicators.technical import TechnicalIndicators
-from src.strategies.base_strategy import BaseStrategy, Signal
-from src.strategies.rsi_strategy import RSIStrategy
-from src.strategies.macd_strategy import MACDStrategy
-from src.strategies.bollinger_strategy import BollingerStrategy
-from src.strategies.combined_strategy import CombinedStrategy
+from src.exchanges.exchange_factory import create_all_exchanges
+from src.monitor.fx_rate import FXRateProvider
+from src.monitor.price_monitor import PriceMonitor
+from src.arbitrage.detector import ArbitrageDetector
+from src.execution.engine import ExecutionEngine
 from src.risk.manager import RiskManager
 from src.utils.logger import setup_logger
+from src.utils.dashboard import Dashboard
 
 logger = logging.getLogger(__name__)
 
 
-class TradingBot:
-    """자동매매 봇 메인 엔진"""
+class ArbitrageBot:
+    """거래소 간 재정거래 자동매매 봇"""
 
-    STRATEGY_MAP = {
-        "rsi": RSIStrategy,
-        "macd": MACDStrategy,
-        "bollinger": BollingerStrategy,
-        "combined": CombinedStrategy,
-    }
-
-    def __init__(self, config: Optional[AppConfig] = None):
+    def __init__(self, config: AppConfig = None, live: bool = False):
         self.config = config or AppConfig()
         self.running = False
 
         setup_logger(self.config.log_level)
 
-        self.client = UpbitClient(self.config.exchange, self.config.trading)
-        self.indicators = TechnicalIndicators(self.config.indicator)
-        self.risk_manager = RiskManager(self.config.risk)
-        self.strategy = self._create_strategy()
+        logger.info("=" * 60)
+        logger.info("  거래소 간 재정거래 봇 시작")
+        logger.info("=" * 60)
 
-        logger.info("=" * 50)
-        logger.info("  업비트 자동매매 봇 초기화")
-        logger.info("  대상: %s", self.config.trading.ticker)
-        logger.info("  전략: %s", self.strategy.name)
-        logger.info("  투자비율: %.0f%%", self.config.trading.investment_ratio * 100)
-        logger.info("  최대투자: %s원", f"{self.config.trading.max_investment_krw:,.0f}")
-        logger.info("  손절: %.1f%% / 익절: %.1f%%",
-                     self.config.risk.stop_loss_pct, self.config.risk.take_profit_pct)
-        logger.info("=" * 50)
+        self.exchanges = create_all_exchanges(self.config)
+        if not self.exchanges:
+            logger.error("연결된 거래소가 없습니다!")
+            sys.exit(1)
 
-    def _create_strategy(self) -> BaseStrategy:
-        strategy_name = self.config.trading.strategy.lower()
-        cls = self.STRATEGY_MAP.get(strategy_name, CombinedStrategy)
-        return cls(self.config.indicator)
+        logger.info("연결된 거래소: %s", ", ".join(self.exchanges.keys()))
+        logger.info("모니터링 코인: %s", ", ".join(self.config.arbitrage.target_symbols))
 
-    def _analyze_market(self) -> Optional[dict]:
-        """시장 데이터를 수집하고 분석"""
-        df = self.client.get_ohlcv(count=self.config.trading.candle_count)
-        if df is None:
-            logger.warning("시장 데이터를 가져올 수 없습니다.")
-            return None
-
-        df = self.indicators.add_all_indicators(df)
-        signal = self.strategy.analyze(df)
-
-        current_price = self.client.get_current_price()
-        avg_buy_price = self.client.get_avg_buy_price()
-        holding_volume = self.client.get_holding_volume()
-        krw_balance = self.client.get_balance("KRW")
-        holding_value = holding_volume * current_price
-
-        validated_signal = self.risk_manager.validate_signal(
-            signal, avg_buy_price, current_price, krw_balance, holding_value
+        self.fx_provider = FXRateProvider()
+        self.price_monitor = PriceMonitor(
+            self.exchanges, self.fx_provider, self.config.arbitrage.target_symbols,
         )
 
-        return {
-            "signal": validated_signal,
-            "current_price": current_price,
-            "avg_buy_price": avg_buy_price,
-            "holding_volume": holding_volume,
-            "krw_balance": krw_balance,
-            "holding_value": holding_value,
-        }
+        fee_rates = {name: ex.fee_rate for name, ex in self.exchanges.items()}
+        self.detector = ArbitrageDetector(self.config.arbitrage, fee_rates)
 
-    def _execute_trade(self, analysis: dict):
-        """분석 결과에 따라 매매 실행"""
-        signal = analysis["signal"]
+        self.risk_manager = RiskManager(self.config.arbitrage)
+        self.execution = ExecutionEngine(
+            self.exchanges, self.risk_manager, self.config.arbitrage, self.fx_provider,
+        )
+        self.execution.dry_run = not live
 
-        if not signal.is_actionable:
-            logger.info("[관망] %s (신뢰도: %.2f)", signal.reason, signal.confidence)
-            return
+        self.dashboard = Dashboard()
 
-        if signal.signal == Signal.BUY:
-            amount = self.client.get_investment_amount()
-            if amount >= 5000:
-                logger.info("[매수] %.0f원 투자 - %s", amount, signal.reason)
-                result = self.client.buy_market_order(amount=amount)
-                if result:
-                    self.risk_manager.record_trade(True)
-            else:
-                logger.info("[매수 불가] 투자 가능 금액 부족: %.0f원", amount)
+        mode = "실거래" if live else "시뮬레이션"
+        logger.info("실행 모드: %s", mode)
+        logger.info("최소 수익률: %.2f%%", self.config.arbitrage.min_profit_pct)
+        logger.info("최대 슬리피지: %.2f%%", self.config.arbitrage.max_slippage_pct)
+        logger.info("1회 최대 거래: %.0f USDT", self.config.arbitrage.max_trade_usdt)
 
-        elif signal.signal == Signal.SELL:
-            volume = analysis["holding_volume"]
-            if volume > 0:
-                avg_price = analysis["avg_buy_price"]
-                current_price = analysis["current_price"]
-                is_profit = current_price > avg_price if avg_price > 0 else True
-
-                logger.info("[매도] %.8f개 - %s", volume, signal.reason)
-                result = self.client.sell_market_order(volume=volume)
-                if result:
-                    self.risk_manager.record_trade(is_profit)
-            else:
-                logger.info("[매도 불가] 보유 수량 없음")
-
-    def run_once(self):
-        """한 사이클 실행 (분석 → 판단 → 실행)"""
+    def run_once(self) -> dict:
+        """한 사이클: 가격 조회 → 기회 탐지 → 실행"""
         try:
-            analysis = self._analyze_market()
-            if analysis:
-                self._log_status(analysis)
-                self._execute_trade(analysis)
+            snapshots = self.price_monitor.fetch_all_prices()
+            all_opportunities = self.detector.detect_all(snapshots)
+            profitable = self.detector.detect_profitable(snapshots)
+
+            for opp in profitable:
+                result = self.execution.execute(opp)
+                if result.success:
+                    logger.info("거래 실행: %s", result.summary())
+
+            return {
+                "snapshots": snapshots,
+                "all_opportunities": all_opportunities,
+                "profitable": profitable,
+            }
         except Exception as e:
-            logger.error("매매 사이클 오류: %s", e, exc_info=True)
+            logger.error("사이클 오류: %s", e, exc_info=True)
+            return {"snapshots": {}, "all_opportunities": [], "profitable": []}
 
-    def _log_status(self, analysis: dict):
-        """현재 상태 로깅"""
-        logger.info(
-            "[상태] 현재가: %s원 | KRW: %s원 | 보유량: %.8f | 보유가치: %s원",
-            f"{analysis['current_price']:,.0f}",
-            f"{analysis['krw_balance']:,.0f}",
-            analysis["holding_volume"],
-            f"{analysis['holding_value']:,.0f}",
-        )
-
-    def start(self, interval_seconds: int = 60):
-        """봇 실행 (무한 루프)"""
+    def start(self, show_dashboard: bool = True):
+        """봇 시작 (무한 루프)"""
         self.running = True
 
-        def _signal_handler(signum, frame):
-            logger.info("종료 시그널 수신. 봇을 안전하게 종료합니다...")
+        def _stop(signum, frame):
+            logger.info("종료 시그널 수신...")
             self.running = False
 
-        signal.signal(signal.SIGINT, _signal_handler)
-        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _stop)
+        signal.signal(signal.SIGTERM, _stop)
 
-        logger.info("자동매매 봇 시작 (주기: %d초)", interval_seconds)
+        interval = self.config.arbitrage.poll_interval_sec
+        logger.info("모니터링 시작 (주기: %d초)", interval)
 
         while self.running:
-            self.run_once()
-            if self.running:
-                logger.debug("다음 사이클까지 %d초 대기", interval_seconds)
-                for _ in range(interval_seconds):
-                    if not self.running:
-                        break
-                    time.sleep(1)
+            cycle_start = time.time()
 
-        logger.info("자동매매 봇 종료 완료")
+            result = self.run_once()
 
-    def stop(self):
-        """봇 정지"""
-        self.running = False
+            if show_dashboard:
+                fx_rate = self.fx_provider.get_krw_per_usdt()
+                self.dashboard.render(
+                    snapshots=result["snapshots"],
+                    opportunities=result["all_opportunities"],
+                    daily_pnl=self.risk_manager.daily_pnl,
+                    trade_count=self.risk_manager.trade_count_today,
+                    fx_rate=fx_rate,
+                )
+
+            elapsed = time.time() - cycle_start
+            sleep_time = max(0, interval - elapsed)
+            if self.running and sleep_time > 0:
+                time.sleep(sleep_time)
+
+        logger.info("봇 종료 완료")
 
 
 def main():
+    live = "--live" in sys.argv
+    no_dashboard = "--no-dashboard" in sys.argv
+
+    if live:
+        print("⚠️  실거래 모드로 실행합니다! 실제 자금이 사용됩니다.")
+        print("   5초 후 시작... (Ctrl+C로 취소)")
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("취소됨")
+            return
+
     config = AppConfig()
-
-    if not config.exchange.is_valid:
-        print("=" * 50)
-        print("  경고: API 키가 설정되지 않았습니다!")
-        print("  .env 파일을 생성하고 API 키를 입력하세요.")
-        print("  (.env.example 파일을 참고하세요)")
-        print("=" * 50)
-        print()
-
-    bot = TradingBot(config)
-
-    if "--once" in sys.argv:
-        bot.run_once()
-    else:
-        interval = 60
-        for i, arg in enumerate(sys.argv):
-            if arg == "--interval" and i + 1 < len(sys.argv):
-                interval = int(sys.argv[i + 1])
-        bot.start(interval_seconds=interval)
+    bot = ArbitrageBot(config, live=live)
+    bot.start(show_dashboard=not no_dashboard)
 
 
 if __name__ == "__main__":

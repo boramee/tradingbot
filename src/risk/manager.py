@@ -1,127 +1,126 @@
-"""리스크 관리 모듈 - 손절/익절, 일일 거래 제한, 포지션 관리"""
+"""재정거래 전용 리스크 관리"""
 
 import logging
-from datetime import datetime, date
-from typing import Optional
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
-from config.settings import RiskConfig
-from src.strategies.base_strategy import Signal, TradeSignal
+from config.settings import ArbitrageConfig
+from src.arbitrage.detector import ArbitrageOpportunity
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class TradeRecord:
+    timestamp: float
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    profit_pct: float
+    amount_usdt: float
+
+
 class RiskManager:
     """
-    리스크 관리:
-    1. 손절/익절 가격 모니터링
-    2. 일일 최대 거래 횟수 제한
-    3. 최대 포지션 비율 제한
-    4. 연속 손실 시 거래 중단
+    재정거래 리스크 관리:
+    1. 최소 순수익률 필터
+    2. 슬리피지 보정
+    3. 거래량 충분성 검증
+    4. 일일 손실 한도
+    5. 동시 거래 수 제한
+    6. 쿨다운 (같은 페어 연속 거래 방지)
     """
 
-    def __init__(self, config: RiskConfig):
+    MAX_CONCURRENT = 3
+    COOLDOWN_SEC = 30
+    MAX_DAILY_LOSS_USDT = 50.0
+
+    def __init__(self, config: ArbitrageConfig):
         self.config = config
-        self._daily_trades: int = 0
-        self._trade_date: date = date.today()
-        self._consecutive_losses: int = 0
-        self._max_consecutive_losses: int = 3
+        self._active_trades: int = 0
+        self._trade_history: List[TradeRecord] = []
+        self._last_trade_time: Dict[str, float] = {}  # "BTC:upbit→binance" → timestamp
+        self._daily_pnl_usdt: float = 0.0
+        self._pnl_date: str = ""
 
-    def _reset_daily_counter(self):
-        today = date.today()
-        if self._trade_date != today:
-            self._daily_trades = 0
-            self._trade_date = today
-            logger.info("일일 거래 카운터 초기화")
+    def validate_opportunity(self, opp: ArbitrageOpportunity) -> tuple[bool, str]:
+        """기회를 실행해도 되는지 리스크 관점에서 검증"""
+        self._reset_daily_pnl_if_needed()
 
-    def check_stop_loss(self, avg_buy_price: float, current_price: float) -> bool:
-        """손절 조건 확인"""
-        if avg_buy_price <= 0:
-            return False
-        loss_pct = (avg_buy_price - current_price) / avg_buy_price * 100
-        if loss_pct >= self.config.stop_loss_pct:
-            logger.warning(
-                "손절 조건 충족: 평단가 %.0f → 현재가 %.0f (손실률: %.2f%%)",
-                avg_buy_price, current_price, loss_pct,
-            )
-            return True
-        return False
+        if opp.net_profit_pct < self.config.min_profit_pct:
+            return False, f"순수익률 부족 ({opp.net_profit_pct:.3f}% < {self.config.min_profit_pct}%)"
 
-    def check_take_profit(self, avg_buy_price: float, current_price: float) -> bool:
-        """익절 조건 확인"""
-        if avg_buy_price <= 0:
-            return False
-        profit_pct = (current_price - avg_buy_price) / avg_buy_price * 100
-        if profit_pct >= self.config.take_profit_pct:
-            logger.info(
-                "익절 조건 충족: 평단가 %.0f → 현재가 %.0f (수익률: %.2f%%)",
-                avg_buy_price, current_price, profit_pct,
-            )
-            return True
-        return False
+        slippage_adjusted = opp.net_profit_pct - self.config.max_slippage_pct
+        if slippage_adjusted <= 0:
+            return False, f"슬리피지 감안 시 수익 불가 ({slippage_adjusted:.3f}%)"
 
-    def can_trade(self) -> bool:
-        """거래 가능 여부 확인"""
-        self._reset_daily_counter()
+        if opp.buy_volume < 10 or opp.sell_volume < 10:
+            return False, "거래량 부족 (24h 거래량 < 10)"
 
-        if self._daily_trades >= self.config.max_daily_trades:
-            logger.warning("일일 최대 거래 횟수(%d) 도달", self.config.max_daily_trades)
-            return False
+        if self._active_trades >= self.MAX_CONCURRENT:
+            return False, f"동시 거래 한도 초과 ({self._active_trades}/{self.MAX_CONCURRENT})"
 
-        if self._consecutive_losses >= self._max_consecutive_losses:
-            logger.warning(
-                "연속 손실 %d회 - 거래 일시 중단", self._consecutive_losses
-            )
-            return False
+        trade_key = f"{opp.symbol}:{opp.buy_exchange}→{opp.sell_exchange}"
+        last_time = self._last_trade_time.get(trade_key, 0)
+        if time.time() - last_time < self.COOLDOWN_SEC:
+            remaining = self.COOLDOWN_SEC - (time.time() - last_time)
+            return False, f"쿨다운 중 ({remaining:.0f}초 남음)"
 
-        return True
+        if self._daily_pnl_usdt < -self.MAX_DAILY_LOSS_USDT:
+            return False, f"일일 손실 한도 초과 ({self._daily_pnl_usdt:.2f} USDT)"
 
-    def validate_signal(
-        self,
-        signal: TradeSignal,
-        avg_buy_price: float,
-        current_price: float,
-        krw_balance: float,
-        holding_value: float,
-    ) -> TradeSignal:
-        """전략 신호에 리스크 관리 필터 적용"""
-        total_assets = krw_balance + holding_value
+        return True, "검증 통과"
 
-        if holding_value > 0:
-            if self.check_stop_loss(avg_buy_price, current_price):
-                return TradeSignal(
-                    Signal.SELL, 1.0,
-                    f"[리스크] 손절 실행 (손실률: {(avg_buy_price - current_price) / avg_buy_price * 100:.1f}%)",
-                    current_price,
-                )
-            if self.check_take_profit(avg_buy_price, current_price):
-                return TradeSignal(
-                    Signal.SELL, 0.9,
-                    f"[리스크] 익절 실행 (수익률: {(current_price - avg_buy_price) / avg_buy_price * 100:.1f}%)",
-                    current_price,
-                )
+    def calculate_trade_amount(self, opp: ArbitrageOpportunity) -> float:
+        """리스크를 고려한 거래 금액(USDT) 계산"""
+        base_amount = self.config.max_trade_usdt
 
-        if signal.signal == Signal.BUY and total_assets > 0:
-            position_ratio = holding_value / total_assets
-            if position_ratio >= self.config.max_position_ratio:
-                logger.info(
-                    "포지션 비율 초과 (%.1f%% >= %.1f%%) - 매수 거부",
-                    position_ratio * 100, self.config.max_position_ratio * 100,
-                )
-                return TradeSignal(Signal.HOLD, 0.0, "[리스크] 포지션 비율 초과", current_price)
+        if opp.net_profit_pct < self.config.min_profit_pct * 2:
+            base_amount *= 0.5
 
-        if not self.can_trade() and signal.signal != Signal.HOLD:
-            return TradeSignal(Signal.HOLD, 0.0, "[리스크] 거래 제한 상태", current_price)
+        max_by_volume = min(opp.buy_volume, opp.sell_volume) * opp.buy_price_usdt * 0.01
+        amount = min(base_amount, max_by_volume)
 
-        return signal
+        return max(amount, 0)
 
-    def record_trade(self, is_profit: bool):
-        """거래 결과 기록"""
-        self._daily_trades += 1
-        if is_profit:
-            self._consecutive_losses = 0
-        else:
-            self._consecutive_losses += 1
-            logger.warning("연속 손실: %d회", self._consecutive_losses)
+    def on_trade_start(self, opp: ArbitrageOpportunity):
+        """거래 시작 기록"""
+        self._active_trades += 1
+        trade_key = f"{opp.symbol}:{opp.buy_exchange}→{opp.sell_exchange}"
+        self._last_trade_time[trade_key] = time.time()
 
-    def reset_consecutive_losses(self):
-        self._consecutive_losses = 0
+    def on_trade_complete(self, opp: ArbitrageOpportunity, actual_profit_usdt: float):
+        """거래 완료 기록"""
+        self._active_trades = max(0, self._active_trades - 1)
+        self._daily_pnl_usdt += actual_profit_usdt
+        self._trade_history.append(TradeRecord(
+            timestamp=time.time(),
+            symbol=opp.symbol,
+            buy_exchange=opp.buy_exchange,
+            sell_exchange=opp.sell_exchange,
+            profit_pct=opp.net_profit_pct,
+            amount_usdt=actual_profit_usdt,
+        ))
+        logger.info("거래 완료: %s (수익: %.4f USDT, 일일 누적: %.4f USDT)",
+                     opp.symbol, actual_profit_usdt, self._daily_pnl_usdt)
+
+    def _reset_daily_pnl_if_needed(self):
+        import datetime
+        today = datetime.date.today().isoformat()
+        if self._pnl_date != today:
+            if self._pnl_date:
+                logger.info("일일 PnL 초기화 (전일: %.4f USDT)", self._daily_pnl_usdt)
+            self._daily_pnl_usdt = 0.0
+            self._pnl_date = today
+
+    @property
+    def daily_pnl(self) -> float:
+        return self._daily_pnl_usdt
+
+    @property
+    def trade_count_today(self) -> int:
+        import datetime
+        today = datetime.date.today().isoformat()
+        cutoff = time.mktime(datetime.date.today().timetuple())
+        return sum(1 for t in self._trade_history if t.timestamp >= cutoff)
