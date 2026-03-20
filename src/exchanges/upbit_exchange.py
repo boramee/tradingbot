@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 class UpbitExchange(BaseExchange):
     """업비트 API 래퍼 - KRW 마켓"""
 
+    SUPPORTED_TETHER = {"USDT"}
+
     def __init__(self, keys: ExchangeKeys):
         super().__init__(name="upbit", quote_currency="KRW", fee_rate=0.0005)
         self._upbit = None
@@ -27,7 +29,16 @@ class UpbitExchange(BaseExchange):
     def _krw_ticker(self, symbol: str) -> str:
         return f"KRW-{symbol}"
 
+    def _is_supported(self, symbol: str) -> bool:
+        """업비트에서 지원하는 테더 토큰인지 확인"""
+        from src.monitor.fx_rate import TETHER_PEG
+        if symbol in TETHER_PEG:
+            return symbol in self.SUPPORTED_TETHER
+        return True
+
     def fetch_ticker(self, symbol: str) -> Optional[Ticker]:
+        if not self._is_supported(symbol):
+            return None
         try:
             pair = self._krw_ticker(symbol)
             orderbook = pyupbit.get_orderbook(pair)
@@ -69,6 +80,8 @@ class UpbitExchange(BaseExchange):
     def fetch_tickers(self, symbols: List[str]) -> Dict[str, Ticker]:
         result = {}
         for symbol in symbols:
+            if not self._is_supported(symbol):
+                continue
             ticker = self.fetch_ticker(symbol)
             if ticker:
                 result[symbol] = ticker

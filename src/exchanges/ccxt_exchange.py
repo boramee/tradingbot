@@ -28,6 +28,7 @@ EXCHANGE_CONFIGS = {
         "quote": "KRW",
         "fee": 0.0025,
         "korean": True,
+        "supported_tether": ["USDT"],
     },
     "bitfinex": {
         "class": "bitfinex2",
@@ -95,8 +96,20 @@ class CcxtExchange(BaseExchange):
     def _is_tether_token(self, symbol: str) -> bool:
         return symbol in TETHER_PAIRS
 
+    def _is_supported_tether(self, symbol: str) -> bool:
+        """이 거래소에서 지원하는 테더 토큰인지 확인"""
+        if not self._is_tether_token(symbol):
+            return True
+        cfg = EXCHANGE_CONFIGS.get(self.name, {})
+        supported = cfg.get("supported_tether")
+        if supported is not None:
+            return symbol in supported
+        return symbol in TETHER_PAIRS and self.name in TETHER_PAIRS[symbol]
+
     def fetch_ticker(self, symbol: str) -> Optional[Ticker]:
         if self._is_tether_token(symbol):
+            if not self._is_supported_tether(symbol):
+                return None
             return self._fetch_tether_ticker(symbol)
         try:
             pair = self._make_pair(symbol)
@@ -179,6 +192,8 @@ class CcxtExchange(BaseExchange):
                         result[symbol] = ticker
 
         for symbol in tether_symbols:
+            if not self._is_supported_tether(symbol):
+                continue
             ticker = self._fetch_tether_ticker(symbol)
             if ticker:
                 result[symbol] = ticker
