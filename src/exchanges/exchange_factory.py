@@ -30,6 +30,7 @@ def create_all_exchanges(config: AppConfig) -> Dict[str, BaseExchange]:
         "bithumb": config.bithumb,
         "binance": config.binance,
         "bybit": config.bybit,
+        "bitfinex": config.bitfinex,
     }
 
     for name, keys in exchange_map.items():

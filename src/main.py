@@ -28,7 +28,7 @@ class ArbitrageBot:
         setup_logger(self.config.log_level)
 
         logger.info("=" * 60)
-        logger.info("  거래소 간 재정거래 봇 시작")
+        logger.info("  테더 토큰 재정거래 봇 시작")
         logger.info("=" * 60)
 
         self.exchanges = create_all_exchanges(self.config)
@@ -37,7 +37,7 @@ class ArbitrageBot:
             sys.exit(1)
 
         logger.info("연결된 거래소: %s", ", ".join(self.exchanges.keys()))
-        logger.info("모니터링 코인: %s", ", ".join(self.config.arbitrage.target_symbols))
+        logger.info("모니터링 테더 토큰: %s", ", ".join(self.config.arbitrage.target_symbols))
 
         self.fx_provider = FXRateProvider()
         self.price_monitor = PriceMonitor(
@@ -102,7 +102,7 @@ class ArbitrageBot:
             result = self.run_once()
 
             if show_dashboard:
-                fx_rate = self.fx_provider.get_krw_per_usdt()
+                fx_rate = self.fx_provider.get_rate("USD")
                 self.dashboard.render(
                     snapshots=result["snapshots"],
                     opportunities=result["all_opportunities"],

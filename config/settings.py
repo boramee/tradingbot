@@ -33,7 +33,7 @@ class ExchangeKeys:
 
 @dataclass
 class ArbitrageConfig:
-    target_symbols: List[str] = field(default_factory=lambda: ["USDT", "BTC", "ETH", "XRP", "SOL", "DOGE"])
+    target_symbols: List[str] = field(default_factory=lambda: ["USDT", "EURT", "CNHT", "XAUT"])
     min_profit_pct: float = 0.5
     max_slippage_pct: float = 0.3
     max_trade_usdt: float = 1000.0
@@ -59,6 +59,7 @@ class AppConfig:
     bithumb: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
     binance: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
     bybit: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
+    bitfinex: ExchangeKeys = field(default_factory=lambda: ExchangeKeys())
     arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
     log_level: str = "INFO"
 
@@ -67,13 +68,14 @@ class AppConfig:
         self.bithumb = ExchangeKeys(_env("BITHUMB_ACCESS_KEY"), _env("BITHUMB_SECRET_KEY"))
         self.binance = ExchangeKeys(_env("BINANCE_ACCESS_KEY"), _env("BINANCE_SECRET_KEY"))
         self.bybit = ExchangeKeys(_env("BYBIT_ACCESS_KEY"), _env("BYBIT_SECRET_KEY"))
+        self.bitfinex = ExchangeKeys(_env("BITFINEX_ACCESS_KEY"), _env("BITFINEX_SECRET_KEY"))
         self.log_level = _env("LOG_LEVEL", "INFO")
 
     @property
     def active_exchanges(self) -> List[str]:
         """API 키가 설정된 거래소 목록"""
         result = []
-        for name in ("upbit", "bithumb", "binance", "bybit"):
+        for name in ("upbit", "bithumb", "binance", "bybit", "bitfinex"):
             keys: ExchangeKeys = getattr(self, name)
             if keys.is_valid:
                 result.append(name)

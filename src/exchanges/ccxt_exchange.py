@@ -29,6 +29,33 @@ EXCHANGE_CONFIGS = {
         "fee": 0.0025,
         "korean": True,
     },
+    "bitfinex": {
+        "class": "bitfinex2",
+        "quote": "USD",
+        "fee": 0.002,
+        "korean": False,
+    },
+}
+
+# 테더 토큰별 거래소별 조회 페어 (우선순위 순)
+TETHER_PAIRS = {
+    "USDT": {
+        "binance":  ["USDT/USDC", "USDT/FDUSD"],
+        "bybit":    ["USDT/USDC"],
+        "bitfinex": ["USDT/USD"],
+    },
+    "EURT": {
+        "binance":  ["EURT/USDT"],
+        "bitfinex": ["EURT/USD", "EURT/USDT"],
+    },
+    "CNHT": {
+        "bitfinex": ["CNHT/USDT", "CNHT/USD"],
+    },
+    "XAUT": {
+        "binance":  ["XAUT/USDT"],
+        "bybit":    ["XAUT/USDT"],
+        "bitfinex": ["XAUT/USD", "XAUT/USDT"],
+    },
 }
 
 
@@ -62,15 +89,15 @@ class CcxtExchange(BaseExchange):
     def is_korean(self) -> bool:
         return self._is_korean
 
-    # USDT는 USDT/USDT가 불가능하므로 USDC 기준으로 조회
-    USDT_REFERENCE_PAIRS = ["USDT/USDC", "USDT/FDUSD", "USDT/DAI"]
-
     def _make_pair(self, symbol: str) -> str:
         return f"{symbol}/{self.quote_currency}"
 
+    def _is_tether_token(self, symbol: str) -> bool:
+        return symbol in TETHER_PAIRS
+
     def fetch_ticker(self, symbol: str) -> Optional[Ticker]:
-        if symbol == "USDT" and self.quote_currency == "USDT":
-            return self._fetch_usdt_ticker()
+        if self._is_tether_token(symbol):
+            return self._fetch_tether_ticker(symbol)
         try:
             pair = self._make_pair(symbol)
             data = self._exchange.fetch_ticker(pair)
@@ -91,9 +118,13 @@ class CcxtExchange(BaseExchange):
             logger.error("[%s] %s 시세 조회 실패: %s", self.name, symbol, e)
             return None
 
-    def _fetch_usdt_ticker(self) -> Optional[Ticker]:
-        """해외 거래소에서 USDT 실제 가격을 USDC 기준으로 조회"""
-        for pair in self.USDT_REFERENCE_PAIRS:
+    def _fetch_tether_ticker(self, symbol: str) -> Optional[Ticker]:
+        """테더 토큰의 실제 거래 가격을 거래소별 전용 페어로 조회"""
+        pairs = TETHER_PAIRS.get(symbol, {}).get(self.name, [])
+        if not pairs:
+            return None
+
+        for pair in pairs:
             try:
                 data = self._exchange.fetch_ticker(pair)
                 bid = float(data.get("bid") or 0)
@@ -103,7 +134,7 @@ class CcxtExchange(BaseExchange):
                     quote = pair.split("/")[1]
                     return Ticker(
                         exchange=self.name,
-                        symbol="USDT",
+                        symbol=symbol,
                         quote=quote,
                         bid=bid,
                         ask=ask,
@@ -114,21 +145,20 @@ class CcxtExchange(BaseExchange):
             except ccxt.BadSymbol:
                 continue
             except Exception as e:
-                logger.debug("[%s] USDT 조회 실패 (%s): %s", self.name, pair, e)
+                logger.debug("[%s] %s 조회 실패 (%s): %s", self.name, symbol, pair, e)
                 continue
-        logger.debug("[%s] USDT 참조 페어 없음", self.name)
         return None
 
     def fetch_tickers(self, symbols: List[str]) -> Dict[str, Ticker]:
         result = {}
-        usdt_requested = "USDT" in symbols
-        coin_symbols = [s for s in symbols if s != "USDT"]
+        tether_symbols = [s for s in symbols if self._is_tether_token(s)]
+        regular_symbols = [s for s in symbols if not self._is_tether_token(s)]
 
-        if coin_symbols:
+        if regular_symbols:
             try:
-                pairs = [self._make_pair(s) for s in coin_symbols]
+                pairs = [self._make_pair(s) for s in regular_symbols]
                 all_tickers = self._exchange.fetch_tickers(pairs)
-                for symbol in coin_symbols:
+                for symbol in regular_symbols:
                     pair = self._make_pair(symbol)
                     if pair in all_tickers:
                         data = all_tickers[pair]
@@ -143,15 +173,15 @@ class CcxtExchange(BaseExchange):
                             timestamp=float(data.get("timestamp") or 0) / 1000,
                         )
             except Exception:
-                for symbol in coin_symbols:
+                for symbol in regular_symbols:
                     ticker = self.fetch_ticker(symbol)
                     if ticker:
                         result[symbol] = ticker
 
-        if usdt_requested:
-            usdt_ticker = self._fetch_usdt_ticker()
-            if usdt_ticker:
-                result["USDT"] = usdt_ticker
+        for symbol in tether_symbols:
+            ticker = self._fetch_tether_ticker(symbol)
+            if ticker:
+                result[symbol] = ticker
 
         return result
 

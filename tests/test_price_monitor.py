@@ -10,7 +10,6 @@ from src.monitor.price_monitor import PriceMonitor, NormalizedPrice
 
 
 def _mock_exchange(name, quote, is_korean, tickers_data):
-    """테스트용 모의 거래소"""
     ex = MagicMock()
     ex.name = name
     ex.quote_currency = quote
@@ -22,13 +21,15 @@ def _mock_exchange(name, quote, is_korean, tickers_data):
         for s in symbols:
             if s in tickers_data:
                 d = tickers_data[s]
-                result[s] = Ticker(name, s, quote, d["bid"], d["ask"], d["last"], d.get("vol", 100))
+                result[s] = Ticker(name, s, d.get("quote", quote),
+                                   d["bid"], d["ask"], d["last"], d.get("vol", 100))
         return result
 
     def _fetch_ticker(symbol):
         if symbol in tickers_data:
             d = tickers_data[symbol]
-            return Ticker(name, symbol, quote, d["bid"], d["ask"], d["last"], d.get("vol", 100))
+            return Ticker(name, symbol, d.get("quote", quote),
+                          d["bid"], d["ask"], d["last"], d.get("vol", 100))
         return None
 
     ex.fetch_tickers = _fetch_tickers
@@ -36,119 +37,101 @@ def _mock_exchange(name, quote, is_korean, tickers_data):
     return ex
 
 
+def _make_fx():
+    fx = FXRateProvider()
+    fx._cache = {"USD": 1350.0, "EUR": 1470.0, "CNH": 186.0, "XAU": 4050000.0}
+    fx._cache_time = __import__("time").time()
+    return fx
+
+
 class TestPriceMonitor:
-    def test_fetch_and_normalize(self):
-        """가격 조회 및 USDT 정규화"""
-        binance = _mock_exchange("binance", "USDT", False, {
-            "BTC": {"bid": 100000, "ask": 100100, "last": 100050},
-        })
+    def test_usdt_korean_vs_foreign(self):
+        """USDT: 한국(KRW) vs 해외(USDC) 가격 비교"""
         upbit = _mock_exchange("upbit", "KRW", True, {
-            "BTC": {"bid": 136350000, "ask": 136500000, "last": 136400000},
+            "USDT": {"bid": 1380, "ask": 1385, "last": 1382, "quote": "KRW"},
+        })
+        binance = _mock_exchange("binance", "USDT", False, {
+            "USDT": {"bid": 0.9998, "ask": 1.0001, "last": 0.9999, "quote": "USDC"},
         })
 
-        fx = FXRateProvider()
-        fx._cached_rate = 1350.0
-        fx._cache_time = __import__("time").time()
-
-        monitor = PriceMonitor(
-            {"binance": binance, "upbit": upbit},
-            fx, ["BTC"],
-        )
-
+        monitor = PriceMonitor({"upbit": upbit, "binance": binance}, _make_fx(), ["USDT"])
         snapshots = monitor.fetch_all_prices()
-        assert "BTC" in snapshots
 
-        snap = snapshots["BTC"]
-        assert "binance" in snap.prices
+        assert "USDT" in snapshots
+        snap = snapshots["USDT"]
+        assert snap.peg_currency == "USD"
         assert "upbit" in snap.prices
+        assert "binance" in snap.prices
 
-        binance_price = snap.prices["binance"]
-        assert abs(binance_price.bid_usdt - 100000) < 1
+        upbit_p = snap.prices["upbit"]
+        assert upbit_p.price_in_krw > 0
+        assert upbit_p.price_in_peg > 1.0  # 프리미엄 있음
 
-        upbit_price = snap.prices["upbit"]
-        expected_usdt = 136350000 / 1350
-        assert abs(upbit_price.bid_usdt - expected_usdt) < 100
+        binance_p = snap.prices["binance"]
+        assert abs(binance_p.price_in_peg - 0.9999) < 0.01
 
-    def test_missing_exchange_data(self):
-        """데이터가 없는 거래소는 스킵"""
-        binance = _mock_exchange("binance", "USDT", False, {
-            "BTC": {"bid": 100000, "ask": 100100, "last": 100050},
+    def test_eurt_pricing(self):
+        """EURT: EUR 페그 기준 가격"""
+        bitfinex = _mock_exchange("bitfinex", "USD", False, {
+            "EURT": {"bid": 1.08, "ask": 1.09, "last": 1.085, "quote": "USD"},
         })
-        empty = _mock_exchange("bybit", "USDT", False, {})
 
-        fx = FXRateProvider()
-        fx._cached_rate = 1350.0
-        fx._cache_time = __import__("time").time()
-
-        monitor = PriceMonitor({"binance": binance, "bybit": empty}, fx, ["BTC"])
+        monitor = PriceMonitor({"bitfinex": bitfinex}, _make_fx(), ["EURT"])
         snapshots = monitor.fetch_all_prices()
 
-        assert "BTC" in snapshots
-        assert "binance" in snapshots["BTC"].prices
-        assert "bybit" not in snapshots["BTC"].prices
+        assert "EURT" in snapshots
+        snap = snapshots["EURT"]
+        assert snap.peg_currency == "EUR"
+        assert "bitfinex" in snap.prices
 
-    def test_usdt_monitoring(self):
-        """USDT 프리미엄 모니터링 - 한국은 KRW-USDT, 해외는 USDT/USDC 실가"""
+        bf_p = snap.prices["bitfinex"]
+        assert bf_p.price_in_krw > 0
+        assert bf_p.price_in_peg > 0
+
+    def test_xaut_pricing(self):
+        """XAUT: 금(XAU) 페그 기준 가격"""
+        bitfinex = _mock_exchange("bitfinex", "USD", False, {
+            "XAUT": {"bid": 3000, "ask": 3010, "last": 3005, "quote": "USD"},
+        })
+
+        monitor = PriceMonitor({"bitfinex": bitfinex}, _make_fx(), ["XAUT"])
+        snapshots = monitor.fetch_all_prices()
+
+        assert "XAUT" in snapshots
+        snap = snapshots["XAUT"]
+        assert snap.peg_currency == "XAU"
+        assert "bitfinex" in snap.prices
+
+    def test_multiple_tether_tokens(self):
+        """여러 테더 토큰 동시 모니터링"""
         upbit = _mock_exchange("upbit", "KRW", True, {
-            "USDT": {"bid": 1380, "ask": 1385, "last": 1382},
+            "USDT": {"bid": 1380, "ask": 1385, "last": 1382, "quote": "KRW"},
         })
-        # 해외 거래소: USDT/USDC 실제 가격 (약 $0.9998)
-        binance = _mock_exchange("binance", "USDT", False, {
-            "USDT": {"bid": 0.9998, "ask": 1.0001, "last": 0.9999},
+        bitfinex = _mock_exchange("bitfinex", "USD", False, {
+            "USDT": {"bid": 1.0001, "ask": 1.0002, "last": 1.0001, "quote": "USD"},
+            "EURT": {"bid": 1.08, "ask": 1.09, "last": 1.085, "quote": "USD"},
+            "XAUT": {"bid": 3000, "ask": 3010, "last": 3005, "quote": "USD"},
         })
-
-        fx = FXRateProvider()
-        fx._cached_rate = 1350.0
-        fx._cache_time = __import__("time").time()
 
         monitor = PriceMonitor(
-            {"upbit": upbit, "binance": binance},
-            fx, ["USDT"],
+            {"upbit": upbit, "bitfinex": bitfinex},
+            _make_fx(), ["USDT", "EURT", "XAUT"],
         )
-
         snapshots = monitor.fetch_all_prices()
+
         assert "USDT" in snapshots
+        assert "EURT" in snapshots
+        assert "XAUT" in snapshots
 
-        usdt_snap = snapshots["USDT"]
-
-        # 업비트: KRW-USDT 실제 가격
-        assert "upbit" in usdt_snap.prices
-        upbit_usdt = usdt_snap.prices["upbit"]
-        assert upbit_usdt.bid_original == 1380
-        assert upbit_usdt.bid_usdt > 1.0
-
-        # 바이낸스: USDT/USDC 실제 시장가
-        assert "binance" in usdt_snap.prices
-        binance_usdt = usdt_snap.prices["binance"]
-        assert abs(binance_usdt.bid_usdt - 0.9998) < 0.001
-        assert abs(binance_usdt.ask_usdt - 1.0001) < 0.001
-
-    def test_usdt_and_coins_together(self):
-        """USDT와 코인을 동시에 모니터링"""
-        upbit = _mock_exchange("upbit", "KRW", True, {
-            "USDT": {"bid": 1380, "ask": 1385, "last": 1382},
-            "BTC": {"bid": 136000000, "ask": 136100000, "last": 136050000},
-        })
-        binance = _mock_exchange("binance", "USDT", False, {
-            "BTC": {"bid": 100000, "ask": 100100, "last": 100050},
-        })
-
-        fx = FXRateProvider()
-        fx._cached_rate = 1350.0
-        fx._cache_time = __import__("time").time()
-
-        monitor = PriceMonitor(
-            {"upbit": upbit, "binance": binance},
-            fx, ["USDT", "BTC"],
-        )
-
+    def test_missing_exchange_skipped(self):
+        """데이터 없는 거래소는 스킵"""
+        empty = _mock_exchange("binance", "USDT", False, {})
+        monitor = PriceMonitor({"binance": empty}, _make_fx(), ["USDT"])
         snapshots = monitor.fetch_all_prices()
-        assert "USDT" in snapshots
-        assert "BTC" in snapshots
-        assert len(snapshots) == 2
+        assert snapshots["USDT"].exchange_count == 0
 
 
 class TestNormalizedPrice:
-    def test_mid_usdt(self):
-        p = NormalizedPrice("binance", "BTC", "USDT", 100000, 100100, 100050, 100000, 100100, 500)
-        assert p.mid_usdt == 100050.0
+    def test_mid_original(self):
+        p = NormalizedPrice("binance", "USDT", "USDC", 0.9998, 1350, 0.9998, 1.0001, 0.9999, 500)
+        assert abs(p.mid_original - 0.9999) < 0.001
