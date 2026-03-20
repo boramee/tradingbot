@@ -1,4 +1,8 @@
-"""기술적 분석 지표 계산"""
+"""기술적 분석 지표 계산
+
+삼성전자 등 국내 주식 일봉 데이터에 기술적 지표를 추가.
+입력 DataFrame 컬럼: open, high, low, close, volume
+"""
 
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ class TechnicalIndicators:
         bb_period: int = 20,
         bb_std: float = 2.0,
         ma_short: int = 5,
-        ma_long: int = 20,
+        ma_mid: int = 20,
+        ma_long: int = 60,
         atr_period: int = 14,
     ):
         self.rsi_period = rsi_period
@@ -28,6 +33,7 @@ class TechnicalIndicators:
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.ma_short = ma_short
+        self.ma_mid = ma_mid
         self.ma_long = ma_long
         self.atr_period = atr_period
 
@@ -70,6 +76,7 @@ class TechnicalIndicators:
 
     def add_ma(self, df: pd.DataFrame) -> pd.DataFrame:
         df["ma_short"] = df["close"].rolling(self.ma_short).mean()
+        df["ma_mid"] = df["close"].rolling(self.ma_mid).mean()
         df["ma_long"] = df["close"].rolling(self.ma_long).mean()
         return df
 

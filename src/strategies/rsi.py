@@ -1,14 +1,19 @@
-"""RSI 전략: 과매수/과매도 + 추세 반전 감지"""
+"""RSI 전략
+
+- RSI 30 이하: 과매도 → 매수
+- RSI 70 이상: 과매수 → 매도
+"""
 
 from __future__ import annotations
 
 import pandas as pd
+
 from .base import BaseStrategy, Signal, TradeSignal
 
 
 class RSIStrategy(BaseStrategy):
 
-    def __init__(self, oversold: float = 30, overbought: float = 70):
+    def __init__(self, oversold: float = 30.0, overbought: float = 70.0):
         self.oversold = oversold
         self.overbought = overbought
 
@@ -18,26 +23,24 @@ class RSIStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame) -> TradeSignal:
         rsi = self._last(df, "rsi")
-        if rsi is None:
-            return TradeSignal(Signal.HOLD, 0, "RSI 데이터 부족")
+        prev_rsi = self._prev(df, "rsi")
+        price = self._last(df, "close") or 0.0
 
-        price = float(df["close"].iloc[-1])
-        prev = self._prev(df, "rsi")
+        if rsi is None:
+            return TradeSignal(Signal.HOLD, 0.0, "RSI 데이터 부족", price)
 
         if rsi <= self.oversold:
             conf = min(1.0, (self.oversold - rsi) / 15 + 0.5)
-            reason = "RSI 과매도 (%.1f)" % rsi
-            if prev is not None and rsi > prev:
-                conf = min(1.0, conf + 0.15)
-                reason += " + 반등"
-            return TradeSignal(Signal.BUY, conf, reason, price)
+            return TradeSignal(Signal.BUY, conf, f"RSI 과매도 ({rsi:.1f})", price)
 
         if rsi >= self.overbought:
             conf = min(1.0, (rsi - self.overbought) / 15 + 0.5)
-            reason = "RSI 과매수 (%.1f)" % rsi
-            if prev is not None and rsi < prev:
-                conf = min(1.0, conf + 0.15)
-                reason += " + 하락"
-            return TradeSignal(Signal.SELL, conf, reason, price)
+            return TradeSignal(Signal.SELL, conf, f"RSI 과매수 ({rsi:.1f})", price)
 
-        return TradeSignal(Signal.HOLD, 0, "RSI 중립 (%.1f)" % rsi, price)
+        if prev_rsi and prev_rsi <= self.oversold and rsi > self.oversold:
+            return TradeSignal(Signal.BUY, 0.6, f"RSI 과매도 탈출 ({prev_rsi:.1f}→{rsi:.1f})", price)
+
+        if prev_rsi and prev_rsi >= self.overbought and rsi < self.overbought:
+            return TradeSignal(Signal.SELL, 0.6, f"RSI 과매수 탈출 ({prev_rsi:.1f}→{rsi:.1f})", price)
+
+        return TradeSignal(Signal.HOLD, 0.0, f"RSI 중립 ({rsi:.1f})", price)

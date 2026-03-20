@@ -1,39 +1,46 @@
-"""볼린저밴드 전략: 상/하단 돌파"""
+"""볼린저 밴드 전략
+
+- 하단 밴드 하향 돌파 후 반등 → 매수
+- 상단 밴드 상향 돌파 후 하락 → 매도
+"""
 
 from __future__ import annotations
 
 import pandas as pd
+
 from .base import BaseStrategy, Signal, TradeSignal
 
 
 class BollingerStrategy(BaseStrategy):
+
+    def __init__(self, buy_threshold: float = 0.05, sell_threshold: float = 0.95):
+        self.buy_threshold = buy_threshold
+        self.sell_threshold = sell_threshold
 
     @property
     def name(self) -> str:
         return "Bollinger"
 
     def analyze(self, df: pd.DataFrame) -> TradeSignal:
-        close = self._last(df, "close")
-        upper = self._last(df, "bb_upper")
-        lower = self._last(df, "bb_lower")
         pctb = self._last(df, "bb_pctb")
+        prev_pctb = self._prev(df, "bb_pctb")
+        price = self._last(df, "close") or 0.0
 
-        if any(v is None for v in (close, upper, lower)):
-            return TradeSignal(Signal.HOLD, 0, "볼린저 데이터 부족")
+        if pctb is None:
+            return TradeSignal(Signal.HOLD, 0.0, "볼린저 데이터 부족", price)
 
-        if close <= lower:
-            d = (lower - close) / lower * 100
-            return TradeSignal(Signal.BUY, min(1.0, d / 2 + 0.55),
-                               "하단 돌파 (%%B: %.2f)" % (pctb or 0), close)
+        if pctb <= self.buy_threshold:
+            conf = min(1.0, (self.buy_threshold - pctb) / 0.2 + 0.5)
+            return TradeSignal(Signal.BUY, conf, f"볼린저 하단 근접 (%B: {pctb:.2f})", price)
 
-        if close >= upper:
-            d = (close - upper) / upper * 100
-            return TradeSignal(Signal.SELL, min(1.0, d / 2 + 0.55),
-                               "상단 돌파 (%%B: %.2f)" % (pctb or 0), close)
+        if prev_pctb is not None and prev_pctb <= 0 and pctb > 0:
+            return TradeSignal(Signal.BUY, 0.7, f"볼린저 하단 반등 (%B: {prev_pctb:.2f}→{pctb:.2f})", price)
 
-        if pctb is not None and pctb < 0.2:
-            return TradeSignal(Signal.BUY, 0.4, "하단 접근 (%%B: %.2f)" % pctb, close)
-        if pctb is not None and pctb > 0.8:
-            return TradeSignal(Signal.SELL, 0.4, "상단 접근 (%%B: %.2f)" % pctb, close)
+        if pctb >= self.sell_threshold:
+            conf = min(1.0, (pctb - self.sell_threshold) / 0.2 + 0.5)
+            return TradeSignal(Signal.SELL, conf, f"볼린저 상단 근접 (%B: {pctb:.2f})", price)
 
-        return TradeSignal(Signal.HOLD, 0, "볼린저 중립", close)
+        if prev_pctb is not None and prev_pctb >= 1.0 and pctb < 1.0:
+            return TradeSignal(Signal.SELL, 0.7, f"볼린저 상단 이탈 (%B: {prev_pctb:.2f}→{pctb:.2f})", price)
+
+        return TradeSignal(Signal.HOLD, 0.0, f"볼린저 중립 (%B: {pctb:.2f})", price)
