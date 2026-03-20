@@ -47,6 +47,8 @@ class PriceSnapshot:
 class PriceMonitor:
     """여러 거래소의 가격을 동시에 조회하고 USDT 기준으로 정규화"""
 
+    USDT_SYMBOL = "USDT"
+
     def __init__(
         self,
         exchanges: Dict[str, BaseExchange],
@@ -63,22 +65,26 @@ class PriceMonitor:
         fx_rate = self.fx_provider.get_krw_per_usdt()
         snapshots: Dict[str, PriceSnapshot] = {}
 
+        coin_symbols = [s for s in self.symbols if s != self.USDT_SYMBOL]
+        has_usdt = self.USDT_SYMBOL in self.symbols
+
         exchange_tickers: Dict[str, Dict[str, Ticker]] = {}
 
-        with ThreadPoolExecutor(max_workers=len(self.exchanges)) as executor:
-            futures = {
-                executor.submit(ex.fetch_tickers, self.symbols): name
-                for name, ex in self.exchanges.items()
-            }
-            for future in as_completed(futures):
-                ex_name = futures[future]
-                try:
-                    tickers = future.result()
-                    exchange_tickers[ex_name] = tickers
-                except Exception as e:
-                    logger.error("[%s] 가격 조회 실패: %s", ex_name, e)
+        if coin_symbols:
+            with ThreadPoolExecutor(max_workers=len(self.exchanges)) as executor:
+                futures = {
+                    executor.submit(ex.fetch_tickers, coin_symbols): name
+                    for name, ex in self.exchanges.items()
+                }
+                for future in as_completed(futures):
+                    ex_name = futures[future]
+                    try:
+                        tickers = future.result()
+                        exchange_tickers[ex_name] = tickers
+                    except Exception as e:
+                        logger.error("[%s] 가격 조회 실패: %s", ex_name, e)
 
-        for symbol in self.symbols:
+        for symbol in coin_symbols:
             snapshot = PriceSnapshot(symbol=symbol, fx_rate=fx_rate)
             for ex_name, tickers in exchange_tickers.items():
                 ticker = tickers.get(symbol)
@@ -91,8 +97,52 @@ class PriceMonitor:
 
             snapshots[symbol] = snapshot
 
+        if has_usdt:
+            usdt_snapshot = self._fetch_usdt_prices(fx_rate)
+            snapshots[self.USDT_SYMBOL] = usdt_snapshot
+
         self._latest = snapshots
         return snapshots
+
+    def _fetch_usdt_prices(self, fx_rate: float) -> PriceSnapshot:
+        """
+        USDT 가격 스냅샷 생성.
+
+        - 한국 거래소: KRW-USDT 실제 거래 가격 조회
+        - 해외 거래소: 1 USDT = 1 USD → fx_rate(실환율)를 기준 가격으로 사용
+          (해외에서 USDT는 항상 ~$1이므로, 환율 기준이 곧 해외 가격)
+        """
+        snapshot = PriceSnapshot(symbol=self.USDT_SYMBOL, fx_rate=fx_rate)
+
+        for ex_name, exchange in self.exchanges.items():
+            if exchange.is_korean:
+                ticker = exchange.fetch_ticker(self.USDT_SYMBOL)
+                if ticker and ticker.bid > 0 and ticker.ask > 0:
+                    snapshot.prices[ex_name] = NormalizedPrice(
+                        exchange=ex_name,
+                        symbol=self.USDT_SYMBOL,
+                        original_quote="KRW",
+                        bid_usdt=ticker.bid / fx_rate,
+                        ask_usdt=ticker.ask / fx_rate,
+                        last_usdt=ticker.last / fx_rate,
+                        bid_original=ticker.bid,
+                        ask_original=ticker.ask,
+                        volume_24h=ticker.volume_24h,
+                    )
+            else:
+                snapshot.prices[ex_name] = NormalizedPrice(
+                    exchange=ex_name,
+                    symbol=self.USDT_SYMBOL,
+                    original_quote="USD",
+                    bid_usdt=1.0,
+                    ask_usdt=1.0,
+                    last_usdt=1.0,
+                    bid_original=fx_rate,
+                    ask_original=fx_rate,
+                    volume_24h=0,
+                )
+
+        return snapshot
 
     def _normalize(
         self, ticker: Ticker, fx_rate: float, is_korean: bool

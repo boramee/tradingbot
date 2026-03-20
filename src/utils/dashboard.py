@@ -38,30 +38,81 @@ class Dashboard:
         hours, remainder = divmod(int(uptime), 3600)
         minutes, seconds = divmod(remainder, 60)
 
-        print("=" * 90)
-        print("  📊 거래소 간 재정거래 모니터링 (Crypto Arbitrage Bot)")
-        print("=" * 90)
-        print(f"  가동시간: {hours:02d}:{minutes:02d}:{seconds:02d} | "
-              f"스캔: {self._scan_count}회 | "
-              f"환율: {fx_rate:,.0f} KRW/USDT | "
-              f"거래: {self._trade_count}건 | "
-              f"일일 PnL: {self._total_profit_usdt:+.4f} USDT")
-        print("-" * 90)
+        print("=" * 95)
+        print("  Crypto Arbitrage Bot - 거래소 간 재정거래 모니터링")
+        print("=" * 95)
+        print(
+            "  가동시간: %02d:%02d:%02d | 스캔: %d회 | "
+            "환율: %s KRW/USD | 거래: %d건 | 일일 PnL: %+.4f USDT"
+            % (hours, minutes, seconds, self._scan_count,
+               "{:,.0f}".format(fx_rate), self._trade_count, self._total_profit_usdt)
+        )
+        print("-" * 95)
 
+        self._render_usdt_premium(snapshots, fx_rate)
+        print()
         self._render_price_table(snapshots, fx_rate)
         print()
         self._render_opportunities(opportunities)
         print()
         self._render_kimchi_premium(snapshots)
-        print("-" * 90)
-        print("  Ctrl+C로 종료 | 시뮬레이션 모드 (--live 옵션으로 실거래)")
+        print("-" * 95)
+        print("  Ctrl+C 종료 | 시뮬레이션 모드 (--live 옵션으로 실거래)")
+
+    def _render_usdt_premium(self, snapshots: Dict[str, PriceSnapshot], fx_rate: float):
+        """USDT(테더) 프리미엄 현황 - 핵심 지표"""
+        print("\n  [USDT(테더) 프리미엄 현황]")
+
+        usdt_snap = snapshots.get("USDT")
+        if not usdt_snap or not usdt_snap.prices:
+            print("  USDT 데이터 없음 (TARGET_SYMBOLS에 USDT 추가 필요)")
+            return
+
+        headers = ["거래소", "USDT 매수호가(KRW)", "USDT 매도호가(KRW)", "실환율(KRW/USD)", "프리미엄(매수)", "프리미엄(매도)"]
+        rows = []
+
+        for ex_name, price in sorted(usdt_snap.prices.items()):
+            if price.original_quote == "KRW":
+                bid_premium = (price.bid_original - fx_rate) / fx_rate * 100 if fx_rate > 0 else 0
+                ask_premium = (price.ask_original - fx_rate) / fx_rate * 100 if fx_rate > 0 else 0
+                rows.append([
+                    ex_name.upper(),
+                    "{:,.0f}".format(price.bid_original),
+                    "{:,.0f}".format(price.ask_original),
+                    "{:,.0f}".format(fx_rate),
+                    "%+.2f%%" % bid_premium,
+                    "%+.2f%%" % ask_premium,
+                ])
+
+        if rows:
+            print(tabulate(rows, headers=headers, tablefmt="simple", stralign="right"))
+            if fx_rate > 0:
+                korean_prices = [p for p in usdt_snap.prices.values() if p.original_quote == "KRW"]
+                if korean_prices:
+                    best = korean_prices[0]
+                    gap = best.bid_original - fx_rate
+                    print(
+                        "\n  >> USDT 1개당 차익: %s원 (매수호가 %s - 실환율 %s)"
+                        % ("{:,.0f}".format(gap),
+                           "{:,.0f}".format(best.bid_original),
+                           "{:,.0f}".format(fx_rate))
+                    )
+        else:
+            if fx_rate > 0:
+                print("  해외 기준: 1 USDT = 1 USD = %s KRW (실환율)" % "{:,.0f}".format(fx_rate))
+                print("  한국 거래소 USDT 가격 데이터 없음")
 
     def _render_price_table(self, snapshots: Dict[str, PriceSnapshot], fx_rate: float):
         """거래소별 가격 비교 테이블"""
-        print("\n  [거래소별 실시간 가격 (USDT 기준)]")
+        print("  [거래소별 실시간 가격 (USDT 기준)]")
+
+        coin_snapshots = {s: snap for s, snap in snapshots.items() if s != "USDT"}
+        if not coin_snapshots:
+            print("  코인 데이터 없음")
+            return
 
         all_exchanges = set()
-        for snap in snapshots.values():
+        for snap in coin_snapshots.values():
             all_exchanges.update(snap.prices.keys())
         exchanges = sorted(all_exchanges)
 
@@ -72,7 +123,7 @@ class Dashboard:
         headers = ["코인"] + [ex.upper() for ex in exchanges] + ["최대 스프레드"]
         rows = []
 
-        for symbol, snap in sorted(snapshots.items()):
+        for symbol, snap in sorted(coin_snapshots.items()):
             row = [symbol]
             prices_usdt = []
 
@@ -80,16 +131,19 @@ class Dashboard:
                 p = snap.prices.get(ex)
                 if p and p.mid_usdt > 0:
                     if p.original_quote == "KRW":
-                        row.append(f"{p.mid_usdt:,.2f}\n({p.bid_original:,.0f}₩)")
+                        row.append(
+                            "%s\n(%s won)" % ("{:,.2f}".format(p.mid_usdt),
+                                               "{:,.0f}".format(p.bid_original))
+                        )
                     else:
-                        row.append(f"{p.mid_usdt:,.2f}")
+                        row.append("{:,.2f}".format(p.mid_usdt))
                     prices_usdt.append(p.mid_usdt)
                 else:
                     row.append("-")
 
             if len(prices_usdt) >= 2:
                 max_spread = (max(prices_usdt) - min(prices_usdt)) / min(prices_usdt) * 100
-                row.append(f"{max_spread:.3f}%")
+                row.append("%.3f%%" % max_spread)
             else:
                 row.append("-")
 
@@ -105,32 +159,43 @@ class Dashboard:
             print("  현재 수익성 있는 기회 없음")
             return
 
-        headers = ["유형", "코인", "매수 거래소", "매도 거래소", "스프레드", "순수익(예상)", "상태"]
+        headers = ["유형", "대상", "매수 거래소", "매도 거래소", "스프레드", "순수익(예상)", "상태"]
         rows = []
 
         for opp in opportunities[:10]:
-            status = "✅ 실행 가능" if opp.is_profitable and opp.net_profit_pct >= 0.5 else "⚠️ 관찰"
+            status = "** 실행가능 **" if opp.is_profitable and opp.net_profit_pct >= 0.5 else "[관찰]"
             type_label = "김프" if opp.arb_type.value == "kimchi_premium" else "크로스"
+
+            if opp.symbol == "USDT":
+                buy_str = "%s(%s %s)" % (opp.buy_exchange, "{:,.0f}".format(opp.buy_price_original), opp.buy_quote)
+                sell_str = "%s(%s %s)" % (opp.sell_exchange, "{:,.0f}".format(opp.sell_price_original), opp.sell_quote)
+            else:
+                buy_str = "%s(%s %s)" % (opp.buy_exchange, "{:,.2f}".format(opp.buy_price_original), opp.buy_quote)
+                sell_str = "%s(%s %s)" % (opp.sell_exchange, "{:,.2f}".format(opp.sell_price_original), opp.sell_quote)
+
             rows.append([
                 type_label,
                 opp.symbol,
-                f"{opp.buy_exchange}({opp.buy_price_original:,.2f}{opp.buy_quote})",
-                f"{opp.sell_exchange}({opp.sell_price_original:,.2f}{opp.sell_quote})",
-                f"{opp.spread_pct:+.3f}%",
-                f"{opp.net_profit_pct:+.3f}%",
+                buy_str,
+                sell_str,
+                "%+.3f%%" % opp.spread_pct,
+                "%+.3f%%" % opp.net_profit_pct,
                 status,
             ])
 
         print(tabulate(rows, headers=headers, tablefmt="simple"))
 
     def _render_kimchi_premium(self, snapshots: Dict[str, PriceSnapshot]):
-        """김치프리미엄 현황"""
-        print("  [김치프리미엄 현황 (업비트 vs 바이낸스)]")
+        """김치프리미엄 현황 (코인별)"""
+        print("  [코인별 김치프리미엄 (업비트 vs 바이낸스)]")
 
         headers = ["코인", "업비트(KRW)", "바이낸스(USDT)", "업비트(USDT환산)", "김치프리미엄"]
         rows = []
 
         for symbol, snap in sorted(snapshots.items()):
+            if symbol == "USDT":
+                continue
+
             upbit = snap.prices.get("upbit")
             binance = snap.prices.get("binance")
 
@@ -140,14 +205,13 @@ class Dashboard:
                 continue
 
             premium = (upbit.mid_usdt - binance.mid_usdt) / binance.mid_usdt * 100
-            sign = "+" if premium > 0 else ""
 
             rows.append([
                 symbol,
-                f"{upbit.bid_original:,.0f} ₩",
-                f"{binance.mid_usdt:,.2f} USDT",
-                f"{upbit.mid_usdt:,.2f} USDT",
-                f"{sign}{premium:.2f}%",
+                "%s won" % "{:,.0f}".format(upbit.bid_original),
+                "%s USDT" % "{:,.2f}".format(binance.mid_usdt),
+                "%s USDT" % "{:,.2f}".format(upbit.mid_usdt),
+                "%+.2f%%" % premium,
             ])
 
         if rows:

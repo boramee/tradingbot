@@ -25,7 +25,14 @@ def _mock_exchange(name, quote, is_korean, tickers_data):
                 result[s] = Ticker(name, s, quote, d["bid"], d["ask"], d["last"], d.get("vol", 100))
         return result
 
+    def _fetch_ticker(symbol):
+        if symbol in tickers_data:
+            d = tickers_data[symbol]
+            return Ticker(name, symbol, quote, d["bid"], d["ask"], d["last"], d.get("vol", 100))
+        return None
+
     ex.fetch_tickers = _fetch_tickers
+    ex.fetch_ticker = _fetch_ticker
     return ex
 
 
@@ -79,6 +86,65 @@ class TestPriceMonitor:
         assert "BTC" in snapshots
         assert "binance" in snapshots["BTC"].prices
         assert "bybit" not in snapshots["BTC"].prices
+
+    def test_usdt_monitoring(self):
+        """USDT 프리미엄 모니터링 - 한국 거래소는 실가격, 해외는 $1 기준"""
+        upbit = _mock_exchange("upbit", "KRW", True, {
+            "USDT": {"bid": 1380, "ask": 1385, "last": 1382},
+        })
+        binance = _mock_exchange("binance", "USDT", False, {})
+
+        fx = FXRateProvider()
+        fx._cached_rate = 1350.0
+        fx._cache_time = __import__("time").time()
+
+        monitor = PriceMonitor(
+            {"upbit": upbit, "binance": binance},
+            fx, ["USDT"],
+        )
+
+        snapshots = monitor.fetch_all_prices()
+        assert "USDT" in snapshots
+
+        usdt_snap = snapshots["USDT"]
+
+        # 업비트: KRW-USDT 실제 가격 조회
+        assert "upbit" in usdt_snap.prices
+        upbit_usdt = usdt_snap.prices["upbit"]
+        assert upbit_usdt.bid_original == 1380
+        assert upbit_usdt.ask_original == 1385
+        # 1380 / 1350 = 1.0222... (USDT 기준 약 2.2% 프리미엄)
+        assert upbit_usdt.bid_usdt > 1.0
+
+        # 바이낸스: 1 USDT = 1 USD 기준
+        assert "binance" in usdt_snap.prices
+        binance_usdt = usdt_snap.prices["binance"]
+        assert binance_usdt.bid_usdt == 1.0
+        assert binance_usdt.ask_usdt == 1.0
+
+    def test_usdt_and_coins_together(self):
+        """USDT와 코인을 동시에 모니터링"""
+        upbit = _mock_exchange("upbit", "KRW", True, {
+            "USDT": {"bid": 1380, "ask": 1385, "last": 1382},
+            "BTC": {"bid": 136000000, "ask": 136100000, "last": 136050000},
+        })
+        binance = _mock_exchange("binance", "USDT", False, {
+            "BTC": {"bid": 100000, "ask": 100100, "last": 100050},
+        })
+
+        fx = FXRateProvider()
+        fx._cached_rate = 1350.0
+        fx._cache_time = __import__("time").time()
+
+        monitor = PriceMonitor(
+            {"upbit": upbit, "binance": binance},
+            fx, ["USDT", "BTC"],
+        )
+
+        snapshots = monitor.fetch_all_prices()
+        assert "USDT" in snapshots
+        assert "BTC" in snapshots
+        assert len(snapshots) == 2
 
 
 class TestNormalizedPrice:

@@ -33,7 +33,7 @@ class ExchangeKeys:
 
 @dataclass
 class ArbitrageConfig:
-    target_symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "XRP", "SOL", "DOGE"])
+    target_symbols: List[str] = field(default_factory=lambda: ["USDT", "BTC", "ETH", "XRP", "SOL", "DOGE"])
     min_profit_pct: float = 0.5
     max_slippage_pct: float = 0.3
     max_trade_usdt: float = 1000.0
