@@ -61,46 +61,72 @@ class Dashboard:
 
     def _render_usdt_premium(self, snapshots: Dict[str, PriceSnapshot], fx_rate: float):
         """USDT(테더) 프리미엄 현황 - 핵심 지표"""
-        print("\n  [USDT(테더) 프리미엄 현황]")
+        print("\n  [USDT(테더) 거래소별 가격 현황]")
 
         usdt_snap = snapshots.get("USDT")
         if not usdt_snap or not usdt_snap.prices:
             print("  USDT 데이터 없음 (TARGET_SYMBOLS에 USDT 추가 필요)")
             return
 
-        headers = ["거래소", "USDT 매수호가(KRW)", "USDT 매도호가(KRW)", "실환율(KRW/USD)", "프리미엄(매수)", "프리미엄(매도)"]
+        headers = ["거래소", "기준통화", "매수호가", "매도호가", "USDT환산($)", "실환율 대비 프리미엄"]
         rows = []
 
         for ex_name, price in sorted(usdt_snap.prices.items()):
             if price.original_quote == "KRW":
-                bid_premium = (price.bid_original - fx_rate) / fx_rate * 100 if fx_rate > 0 else 0
-                ask_premium = (price.ask_original - fx_rate) / fx_rate * 100 if fx_rate > 0 else 0
+                premium = (price.bid_original - fx_rate) / fx_rate * 100 if fx_rate > 0 else 0
                 rows.append([
                     ex_name.upper(),
-                    "{:,.0f}".format(price.bid_original),
-                    "{:,.0f}".format(price.ask_original),
-                    "{:,.0f}".format(fx_rate),
-                    "%+.2f%%" % bid_premium,
-                    "%+.2f%%" % ask_premium,
+                    "KRW",
+                    "{:,.0f} won".format(price.bid_original),
+                    "{:,.0f} won".format(price.ask_original),
+                    "$%.4f" % price.mid_usdt,
+                    "%+.2f%%" % premium,
+                ])
+            else:
+                # 해외: USDT/USDC 실제 가격
+                deviation = (price.mid_usdt - 1.0) * 100
+                rows.append([
+                    ex_name.upper(),
+                    price.original_quote,
+                    "%.4f" % price.bid_original,
+                    "%.4f" % price.ask_original,
+                    "$%.4f" % price.mid_usdt,
+                    "%+.3f%% (vs $1)" % deviation,
                 ])
 
         if rows:
             print(tabulate(rows, headers=headers, tablefmt="simple", stralign="right"))
-            if fx_rate > 0:
-                korean_prices = [p for p in usdt_snap.prices.values() if p.original_quote == "KRW"]
-                if korean_prices:
-                    best = korean_prices[0]
-                    gap = best.bid_original - fx_rate
-                    print(
-                        "\n  >> USDT 1개당 차익: %s원 (매수호가 %s - 실환율 %s)"
-                        % ("{:,.0f}".format(gap),
-                           "{:,.0f}".format(best.bid_original),
-                           "{:,.0f}".format(fx_rate))
-                    )
-        else:
-            if fx_rate > 0:
-                print("  해외 기준: 1 USDT = 1 USD = %s KRW (실환율)" % "{:,.0f}".format(fx_rate))
-                print("  한국 거래소 USDT 가격 데이터 없음")
+
+            korean_prices = [p for p in usdt_snap.prices.values() if p.original_quote == "KRW"]
+            foreign_prices = [p for p in usdt_snap.prices.values() if p.original_quote != "KRW"]
+
+            if korean_prices and foreign_prices:
+                kr_best = max(korean_prices, key=lambda p: p.bid_original)
+                fg_best = min(foreign_prices, key=lambda p: p.ask_usdt)
+                kr_per_usdt = kr_best.bid_original
+                fg_per_usdt = fg_best.ask_usdt * fx_rate if fx_rate > 0 else 0
+                gap = kr_per_usdt - fg_per_usdt
+                premium_pct = gap / fg_per_usdt * 100 if fg_per_usdt > 0 else 0
+
+                print(
+                    "\n  >> 한국 vs 해외 USDT 차익: %s원/개 (프리미엄 %+.2f%%)"
+                    % ("{:,.0f}".format(gap), premium_pct)
+                )
+                print(
+                    "     한국 최고매수: %s원 (%s) | 해외 최저매도: $%.4f (%s) = %s원"
+                    % ("{:,.0f}".format(kr_per_usdt), kr_best.exchange.upper(),
+                       fg_best.ask_usdt, fg_best.exchange.upper(),
+                       "{:,.0f}".format(fg_per_usdt))
+                )
+            elif korean_prices and fx_rate > 0:
+                kr_best = max(korean_prices, key=lambda p: p.bid_original)
+                gap = kr_best.bid_original - fx_rate
+                print(
+                    "\n  >> USDT 프리미엄: %s원/개 (매수호가 %s - 실환율 %s)"
+                    % ("{:,.0f}".format(gap),
+                       "{:,.0f}".format(kr_best.bid_original),
+                       "{:,.0f}".format(fx_rate))
+                )
 
     def _render_price_table(self, snapshots: Dict[str, PriceSnapshot], fx_rate: float):
         """거래소별 가격 비교 테이블"""

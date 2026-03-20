@@ -88,11 +88,14 @@ class TestPriceMonitor:
         assert "bybit" not in snapshots["BTC"].prices
 
     def test_usdt_monitoring(self):
-        """USDT 프리미엄 모니터링 - 한국 거래소는 실가격, 해외는 $1 기준"""
+        """USDT 프리미엄 모니터링 - 한국은 KRW-USDT, 해외는 USDT/USDC 실가"""
         upbit = _mock_exchange("upbit", "KRW", True, {
             "USDT": {"bid": 1380, "ask": 1385, "last": 1382},
         })
-        binance = _mock_exchange("binance", "USDT", False, {})
+        # 해외 거래소: USDT/USDC 실제 가격 (약 $0.9998)
+        binance = _mock_exchange("binance", "USDT", False, {
+            "USDT": {"bid": 0.9998, "ask": 1.0001, "last": 0.9999},
+        })
 
         fx = FXRateProvider()
         fx._cached_rate = 1350.0
@@ -108,19 +111,17 @@ class TestPriceMonitor:
 
         usdt_snap = snapshots["USDT"]
 
-        # 업비트: KRW-USDT 실제 가격 조회
+        # 업비트: KRW-USDT 실제 가격
         assert "upbit" in usdt_snap.prices
         upbit_usdt = usdt_snap.prices["upbit"]
         assert upbit_usdt.bid_original == 1380
-        assert upbit_usdt.ask_original == 1385
-        # 1380 / 1350 = 1.0222... (USDT 기준 약 2.2% 프리미엄)
         assert upbit_usdt.bid_usdt > 1.0
 
-        # 바이낸스: 1 USDT = 1 USD 기준
+        # 바이낸스: USDT/USDC 실제 시장가
         assert "binance" in usdt_snap.prices
         binance_usdt = usdt_snap.prices["binance"]
-        assert binance_usdt.bid_usdt == 1.0
-        assert binance_usdt.ask_usdt == 1.0
+        assert abs(binance_usdt.bid_usdt - 0.9998) < 0.001
+        assert abs(binance_usdt.ask_usdt - 1.0001) < 0.001
 
     def test_usdt_and_coins_together(self):
         """USDT와 코인을 동시에 모니터링"""

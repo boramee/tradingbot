@@ -109,37 +109,40 @@ class PriceMonitor:
         USDT 가격 스냅샷 생성.
 
         - 한국 거래소: KRW-USDT 실제 거래 가격 조회
-        - 해외 거래소: 1 USDT = 1 USD → fx_rate(실환율)를 기준 가격으로 사용
-          (해외에서 USDT는 항상 ~$1이므로, 환율 기준이 곧 해외 가격)
+        - 해외 거래소: USDT/USDC 실제 거래 가격 조회
+          (USDC ≈ $1 기준, USDT의 실시간 시장가를 반영)
         """
         snapshot = PriceSnapshot(symbol=self.USDT_SYMBOL, fx_rate=fx_rate)
 
         for ex_name, exchange in self.exchanges.items():
-            if exchange.is_korean:
-                ticker = exchange.fetch_ticker(self.USDT_SYMBOL)
-                if ticker and ticker.bid > 0 and ticker.ask > 0:
-                    snapshot.prices[ex_name] = NormalizedPrice(
-                        exchange=ex_name,
-                        symbol=self.USDT_SYMBOL,
-                        original_quote="KRW",
-                        bid_usdt=ticker.bid / fx_rate,
-                        ask_usdt=ticker.ask / fx_rate,
-                        last_usdt=ticker.last / fx_rate,
-                        bid_original=ticker.bid,
-                        ask_original=ticker.ask,
-                        volume_24h=ticker.volume_24h,
-                    )
-            else:
+            ticker = exchange.fetch_ticker(self.USDT_SYMBOL)
+            if not ticker or ticker.bid <= 0 or ticker.ask <= 0:
+                continue
+
+            if exchange.is_korean and ticker.quote == "KRW" and fx_rate > 0:
                 snapshot.prices[ex_name] = NormalizedPrice(
                     exchange=ex_name,
                     symbol=self.USDT_SYMBOL,
-                    original_quote="USD",
-                    bid_usdt=1.0,
-                    ask_usdt=1.0,
-                    last_usdt=1.0,
-                    bid_original=fx_rate,
-                    ask_original=fx_rate,
-                    volume_24h=0,
+                    original_quote="KRW",
+                    bid_usdt=ticker.bid / fx_rate,
+                    ask_usdt=ticker.ask / fx_rate,
+                    last_usdt=ticker.last / fx_rate,
+                    bid_original=ticker.bid,
+                    ask_original=ticker.ask,
+                    volume_24h=ticker.volume_24h,
+                )
+            else:
+                # 해외: USDT/USDC 등 스테이블코인 기준 실제 가격
+                snapshot.prices[ex_name] = NormalizedPrice(
+                    exchange=ex_name,
+                    symbol=self.USDT_SYMBOL,
+                    original_quote=ticker.quote,
+                    bid_usdt=ticker.bid,
+                    ask_usdt=ticker.ask,
+                    last_usdt=ticker.last,
+                    bid_original=ticker.bid,
+                    ask_original=ticker.ask,
+                    volume_24h=ticker.volume_24h,
                 )
 
         return snapshot
