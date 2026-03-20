@@ -14,6 +14,7 @@ from src.execution.engine import ExecutionEngine
 from src.risk.manager import RiskManager
 from src.utils.logger import setup_logger
 from src.utils.dashboard import Dashboard
+from src.utils.telegram_bot import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,12 @@ class ArbitrageBot:
 
         self.dashboard = Dashboard()
 
+        import os
+        self.telegram = TelegramNotifier(
+            os.getenv("TELEGRAM_TOKEN", ""),
+            os.getenv("TELEGRAM_CHAT_ID", ""),
+        )
+
         mode = "실거래" if live else "시뮬레이션"
         logger.info("실행 모드: %s", mode)
         logger.info("최소 수익률: %.2f%%", self.config.arbitrage.min_profit_pct)
@@ -69,6 +76,10 @@ class ArbitrageBot:
             profitable = self.detector.detect_profitable(snapshots)
 
             for opp in profitable:
+                self.telegram.notify_arbitrage(
+                    opp.symbol, opp.buy_exchange, opp.sell_exchange,
+                    opp.spread_pct, opp.net_profit_pct,
+                )
                 result = self.execution.execute(opp)
                 if result.success:
                     logger.info("거래 실행: %s", result.summary())

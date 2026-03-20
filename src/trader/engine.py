@@ -18,6 +18,7 @@ from src.strategies.rsi import RSIStrategy
 from src.strategies.macd import MACDStrategy
 from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
+from src.utils.telegram_bot import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,8 @@ class TraderEngine:
         stop_loss_pct: float = 3.0,
         take_profit_pct: float = 5.0,
         candle_count: int = 200,
+        telegram_token: str = "",
+        telegram_chat_id: str = "",
     ):
         self.ticker = ticker
         self.interval = interval
@@ -93,6 +96,7 @@ class TraderEngine:
         self.position = Position(ticker=ticker)
         self.trade_logs: List[TradeLog] = []
         self.running = False
+        self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
 
         self._daily_trades = 0
         self._max_daily_trades = 10
@@ -153,6 +157,7 @@ class TraderEngine:
                 self._daily_trades += 1
                 self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
                 logger.info("[매수] %s | %.0f원 투자 | %s", self.ticker, amount, reason)
+                self.telegram.notify_buy(self.ticker, price, amount, reason)
                 return True
             logger.error("[매수 실패] %s", result)
         else:
@@ -162,6 +167,7 @@ class TraderEngine:
             self.position.entry_time = time.time()
             self._daily_trades += 1
             self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
+            self.telegram.notify_buy(self.ticker, price, amount, "[시뮬] " + reason)
             return True
         return False
 
@@ -179,6 +185,7 @@ class TraderEngine:
                 self._daily_trades += 1
                 self.trade_logs.append(TradeLog(time.time(), "SELL", price, volume * price, reason, pnl_pct))
                 logger.info("[매도] %s | 수익률: %+.2f%% | %s", self.ticker, pnl_pct, reason)
+                self.telegram.notify_sell(self.ticker, price, pnl_pct, reason)
                 self.position = Position(ticker=self.ticker)
                 return True
             logger.error("[매도 실패] %s", result)
@@ -186,6 +193,7 @@ class TraderEngine:
             self._daily_trades += 1
             self.trade_logs.append(TradeLog(time.time(), "SELL", price, volume * price, reason, pnl_pct))
             logger.info("[시뮬] 매도: 수익률 %+.2f%% | %s", pnl_pct, reason)
+            self.telegram.notify_sell(self.ticker, price, pnl_pct, "[시뮬] " + reason)
             self.position = Position(ticker=self.ticker)
             return True
         return False
@@ -227,10 +235,12 @@ class TraderEngine:
         if is_holding:
             if self._check_stop_loss(current_price):
                 loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
+                self.telegram.notify_stop_loss(self.ticker, current_price, loss)
                 self._sell("손절 (%.1f%%)" % loss)
                 return
             if self._check_take_profit(current_price):
                 gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
+                self.telegram.notify_take_profit(self.ticker, current_price, gain)
                 self._sell("익절 (%.1f%%)" % gain)
                 return
 
@@ -278,8 +288,10 @@ class TraderEngine:
         logger.info("  투자비율: %.0f%% | 최대: %s원",
                      self.invest_ratio * 100, "{:,.0f}".format(self.max_invest_krw))
         logger.info("  손절: %.1f%% | 익절: %.1f%%", self.stop_loss_pct, self.take_profit_pct)
-        logger.info("  주기: %d초 | API: %s", poll_sec, "연결됨" if self._upbit else "시뮬레이션")
+        mode = "실거래" if self._upbit else "시뮬레이션"
+        logger.info("  주기: %d초 | API: %s", poll_sec, mode)
         logger.info("=" * 55)
+        self.telegram.notify_start(self.ticker, self.strategy.name, mode)
 
         while self.running:
             try:

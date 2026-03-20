@@ -53,6 +53,8 @@ def main():
         max_invest_krw=args.max_invest,
         stop_loss_pct=args.stop_loss,
         take_profit_pct=args.take_profit,
+        telegram_token=os.getenv("TELEGRAM_TOKEN", ""),
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )
 
     engine.start(poll_sec=args.interval)
