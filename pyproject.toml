@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradingbot"
+version = "0.1.0"
+description = "Minimal exchange-connected trading runner (dry-run by default)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ccxt>=4.4.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+tradingbot = "tradingbot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
