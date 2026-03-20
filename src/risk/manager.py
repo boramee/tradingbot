@@ -1,9 +1,11 @@
 """재정거래 전용 리스크 관리"""
 
+from __future__ import annotations
+
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config.settings import ArbitrageConfig
 from src.arbitrage.detector import ArbitrageOpportunity
