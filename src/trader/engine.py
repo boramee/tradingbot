@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import pandas as pd
 import pyupbit
 
 from src.indicators.technical import TechnicalIndicators
@@ -36,10 +37,16 @@ class Position:
     avg_price: float = 0.0
     volume: float = 0.0
     entry_time: float = 0.0
+    highest_price: float = 0.0  # 보유 중 최고가 (트레일링 스톱용)
+    entry_atr: float = 0.0      # 진입 시점 ATR (동적 손절용)
 
     @property
     def is_holding(self) -> bool:
         return self.volume > 0
+
+    def update_highest(self, current_price: float):
+        if current_price > self.highest_price:
+            self.highest_price = current_price
 
 
 @dataclass
@@ -83,8 +90,10 @@ class TraderEngine:
         self.interval = interval
         self.invest_ratio = invest_ratio
         self.max_invest_krw = max_invest_krw
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
+        self.stop_loss_pct = stop_loss_pct       # ATR 손절 불가 시 폴백
+        self.take_profit_pct = take_profit_pct   # 트레일링 활성화 기준
+        self.trailing_pct = 2.0                  # 최고점 대비 이만큼 빠지면 익절
+        self.atr_stop_multiplier = 2.0           # ATR × 이 배수 = 동적 손절폭
         self.candle_count = candle_count
 
         self._upbit: Optional[pyupbit.Upbit] = None
@@ -140,7 +149,7 @@ class TraderEngine:
 
     # ── 매매 실행 ──
 
-    def _buy(self, reason: str) -> bool:
+    def _buy(self, reason: str, current_atr: float = 0.0) -> bool:
         krw = self._get_krw_balance()
         amount = min(krw * self.invest_ratio, self.max_invest_krw)
         if amount < 5000:
@@ -154,9 +163,12 @@ class TraderEngine:
                 self.position.avg_price = price
                 self.position.volume = amount / price
                 self.position.entry_time = time.time()
+                self.position.highest_price = price
+                self.position.entry_atr = current_atr
                 self._daily_trades += 1
                 self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
-                logger.info("[매수] %s | %.0f원 투자 | %s", self.ticker, amount, reason)
+                atr_info = " (ATR:%.0f)" % current_atr if current_atr > 0 else ""
+                logger.info("[매수] %s | %.0f원 투자%s | %s", self.ticker, amount, atr_info, reason)
                 self.telegram.notify_buy(self.ticker, price, amount, reason)
                 return True
             logger.error("[매수 실패] %s", result)
@@ -165,6 +177,8 @@ class TraderEngine:
             self.position.avg_price = price
             self.position.volume = amount / price
             self.position.entry_time = time.time()
+            self.position.highest_price = price
+            self.position.entry_atr = current_atr
             self._daily_trades += 1
             self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
             self.telegram.notify_buy(self.ticker, price, amount, "[시뮬] " + reason)
@@ -201,16 +215,48 @@ class TraderEngine:
     # ── 손절/익절 ──
 
     def _check_stop_loss(self, current_price: float) -> bool:
+        """ATR 기반 동적 손절. ATR 없으면 고정 %로 폴백."""
         if self.position.avg_price <= 0:
             return False
+
+        if self.position.entry_atr > 0:
+            stop_distance = self.position.entry_atr * self.atr_stop_multiplier
+            stop_price = self.position.avg_price - stop_distance
+            return current_price <= stop_price
+
         loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
         return loss >= self.stop_loss_pct
 
-    def _check_take_profit(self, current_price: float) -> bool:
-        if self.position.avg_price <= 0:
+    def _check_trailing_stop(self, current_price: float) -> bool:
+        """트레일링 스톱: 최고점 대비 N% 하락 시 익절.
+        먼저 take_profit_pct 이상 수익이 나야 활성화됨."""
+        if self.position.avg_price <= 0 or self.position.highest_price <= 0:
             return False
+
+        gain_from_entry = (current_price - self.position.avg_price) / self.position.avg_price * 100
+        if gain_from_entry < self.take_profit_pct:
+            return False
+
+        drop_from_high = (self.position.highest_price - current_price) / self.position.highest_price * 100
+        return drop_from_high >= self.trailing_pct
+
+    def _get_stop_loss_detail(self, current_price: float) -> str:
+        """손절 상세 사유"""
+        if self.position.entry_atr > 0:
+            stop_dist = self.position.entry_atr * self.atr_stop_multiplier
+            stop_price = self.position.avg_price - stop_dist
+            loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
+            return "ATR 동적손절 (ATR:%.0f x%.1f = 손절가:%.0f, 손실:%.1f%%)" % (
+                self.position.entry_atr, self.atr_stop_multiplier, stop_price, loss)
+        loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
+        return "고정손절 (%.1f%%)" % loss
+
+    def _get_trailing_detail(self, current_price: float) -> str:
+        """트레일링 스톱 상세 사유"""
         gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
-        return gain >= self.take_profit_pct
+        drop = (self.position.highest_price - current_price) / self.position.highest_price * 100
+        return "트레일링 익절 (수익:+%.1f%%, 최고점:%s, 하락:%.1f%%)" % (
+            gain, "{:,.0f}".format(self.position.highest_price), drop)
 
     # ── 메인 사이클 ──
 
@@ -231,22 +277,27 @@ class TraderEngine:
 
         is_holding = self.position.volume > 0 and self.position.avg_price > 0
 
-        # 손절/익절 우선 체크
+        # 최고가 갱신 + 손절/익절 체크
         if is_holding:
+            self.position.update_highest(current_price)
+
             if self._check_stop_loss(current_price):
+                detail = self._get_stop_loss_detail(current_price)
                 loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
                 self.telegram.notify_stop_loss(self.ticker, current_price, loss)
-                self._sell("손절 (%.1f%%)" % loss)
+                self._sell(detail)
                 return
-            if self._check_take_profit(current_price):
+
+            if self._check_trailing_stop(current_price):
+                detail = self._get_trailing_detail(current_price)
                 gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
                 self.telegram.notify_take_profit(self.ticker, current_price, gain)
-                self._sell("익절 (%.1f%%)" % gain)
+                self._sell(detail)
                 return
 
         # 전략 분석
         sig = self.strategy.analyze(df)
-        self._log_status(current_price, sig, is_holding)
+        self._log_status(current_price, sig, is_holding, df)
 
         if not sig.is_actionable:
             return
@@ -255,20 +306,33 @@ class TraderEngine:
             return
 
         if sig.signal == Signal.BUY and not is_holding:
-            self._buy(sig.reason)
+            atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
+            self._buy(sig.reason, current_atr=atr)
         elif sig.signal == Signal.SELL and is_holding:
             self._sell(sig.reason)
 
-    def _log_status(self, price: float, sig: TradeSignal, holding: bool):
-        hold_str = ""
+    def _log_status(self, price: float, sig: TradeSignal, holding: bool, df=None):
+        extra = ""
         if holding and self.position.avg_price > 0:
             pnl = (price - self.position.avg_price) / self.position.avg_price * 100
-            hold_str = " | 평단: %s | 수익률: %+.2f%%" % ("{:,.0f}".format(self.position.avg_price), pnl)
+            trail = ""
+            if self.position.highest_price > 0:
+                trail = " | 최고: %s" % "{:,.0f}".format(self.position.highest_price)
+            extra = " | 평단: %s | 수익: %+.2f%%%s" % (
+                "{:,.0f}".format(self.position.avg_price), pnl, trail)
+
+        adx_str = ""
+        if df is not None:
+            adx_val = df["adx"].iloc[-1] if "adx" in df.columns and pd.notna(df["adx"].iloc[-1]) else None
+            if adx_val is not None:
+                trend = "추세" if adx_val >= 20 else "횡보"
+                adx_str = " | ADX:%.0f(%s)" % (adx_val, trend)
+
         logger.info(
-            "[%s] 현재가: %s | 전략: %s | 신호: %s (%.0f%%)%s",
-            self.ticker, "{:,.0f}".format(price),
-            self.strategy.name, sig.signal.value,
-            sig.confidence * 100, hold_str,
+            "[%s] 가격: %s%s | %s (%.0f%%)%s | %s",
+            self.ticker, "{:,.0f}".format(price), adx_str,
+            sig.signal.value, sig.confidence * 100,
+            extra, sig.reason,
         )
 
     def start(self, poll_sec: int = 60):
@@ -287,7 +351,8 @@ class TraderEngine:
         logger.info("  대상: %s | 전략: %s", self.ticker, self.strategy.name)
         logger.info("  투자비율: %.0f%% | 최대: %s원",
                      self.invest_ratio * 100, "{:,.0f}".format(self.max_invest_krw))
-        logger.info("  손절: %.1f%% | 익절: %.1f%%", self.stop_loss_pct, self.take_profit_pct)
+        logger.info("  손절: ATR x%.1f (폴백: %.1f%%)", self.atr_stop_multiplier, self.stop_loss_pct)
+        logger.info("  익절: +%.1f%% 도달 후 트레일링 %.1f%%", self.take_profit_pct, self.trailing_pct)
         mode = "실거래" if self._upbit else "시뮬레이션"
         logger.info("  주기: %d초 | API: %s", poll_sec, mode)
         logger.info("=" * 55)

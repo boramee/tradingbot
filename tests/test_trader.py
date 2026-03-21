@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pandas as pd
 import numpy as np
 import pytest
@@ -36,28 +36,60 @@ class TestPosition:
         p = Position(ticker="KRW-BTC", avg_price=50000, volume=0.01)
         assert p.is_holding is True
 
+    def test_update_highest(self):
+        p = Position(ticker="KRW-BTC", avg_price=50000, volume=0.01, highest_price=52000)
+        p.update_highest(53000)
+        assert p.highest_price == 53000
+        p.update_highest(51000)
+        assert p.highest_price == 53000  # 최고가 유지
 
-class TestStopLoss:
-    def test_triggers(self, engine):
+
+class TestATRStopLoss:
+    def test_atr_stop_triggers(self, engine):
+        """ATR 기반 동적 손절: avg - (ATR × 2) 이하이면 손절"""
         engine.position.avg_price = 100000
+        engine.position.entry_atr = 2000  # ATR=2000, 배수=2.0 → 손절가=96000
+        assert engine._check_stop_loss(95000) is True
+
+    def test_atr_stop_no_trigger(self, engine):
+        engine.position.avg_price = 100000
+        engine.position.entry_atr = 2000
+        assert engine._check_stop_loss(97000) is False
+
+    def test_fallback_fixed_stop(self, engine):
+        """ATR 없으면 고정 3% 손절"""
+        engine.position.avg_price = 100000
+        engine.position.entry_atr = 0
         assert engine._check_stop_loss(96000) is True
-
-    def test_no_trigger(self, engine):
-        engine.position.avg_price = 100000
         assert engine._check_stop_loss(98000) is False
 
-    def test_no_position(self, engine):
-        assert engine._check_stop_loss(50000) is False
 
-
-class TestTakeProfit:
-    def test_triggers(self, engine):
+class TestTrailingStop:
+    def test_not_active_below_threshold(self, engine):
+        """익절 기준(5%) 미달이면 트레일링 비활성"""
         engine.position.avg_price = 100000
-        assert engine._check_take_profit(106000) is True
+        engine.position.highest_price = 103000
+        assert engine._check_trailing_stop(101000) is False
 
-    def test_no_trigger(self, engine):
+    def test_trailing_triggers(self, engine):
+        """5% 이상 수익 후 최고점 대비 2% 하락 시 익절"""
         engine.position.avg_price = 100000
-        assert engine._check_take_profit(103000) is False
+        engine.position.highest_price = 110000  # +10% 최고
+        # 110000 × 0.98 = 107800 이하이면 트레일링 발동
+        assert engine._check_trailing_stop(107000) is True
+
+    def test_trailing_not_yet(self, engine):
+        """최고점 대비 아직 충분히 안 빠짐"""
+        engine.position.avg_price = 100000
+        engine.position.highest_price = 110000
+        assert engine._check_trailing_stop(109000) is False
+
+    def test_trailing_detail(self, engine):
+        engine.position.avg_price = 100000
+        engine.position.highest_price = 110000
+        detail = engine._get_trailing_detail(107000)
+        assert "트레일링" in detail
+        assert "최고점" in detail
 
 
 class TestRunOnce:

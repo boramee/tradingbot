@@ -38,6 +38,7 @@ class TechnicalIndicators:
         df = self.add_bollinger(df)
         df = self.add_ma(df)
         df = self.add_atr(df)
+        df = self.add_adx(df)
         df = self.add_volume_ma(df)
         return df
 
@@ -77,6 +78,33 @@ class TechnicalIndicators:
         h, l, c = df["high"], df["low"], df["close"]
         tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
         df["atr"] = tr.rolling(self.atr_period).mean()
+        return df
+
+    def add_adx(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+        """ADX (Average Directional Index) - 추세 강도 지표
+        ADX >= 25: 추세장 (매매 적합)
+        ADX < 20: 횡보장 (매매 위험)
+        """
+        h, l, c = df["high"], df["low"], df["close"]
+
+        plus_dm = h.diff()
+        minus_dm = -l.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr_sm = tr.ewm(alpha=1 / period, min_periods=period).mean()
+
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / period, min_periods=period).mean() /
+                         atr_sm.replace(0, np.finfo(float).eps))
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / period, min_periods=period).mean() /
+                          atr_sm.replace(0, np.finfo(float).eps))
+
+        dx = 100 * ((plus_di - minus_di).abs() /
+                     (plus_di + minus_di).replace(0, np.finfo(float).eps))
+        df["adx"] = dx.ewm(alpha=1 / period, min_periods=period).mean()
+        df["plus_di"] = plus_di
+        df["minus_di"] = minus_di
         return df
 
     def add_volume_ma(self, df: pd.DataFrame) -> pd.DataFrame:
