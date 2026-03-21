@@ -37,6 +37,9 @@ STRATEGY_MAP: Dict[str, type] = {
 
 MARKET_OPEN = datetime.time(9, 0)
 MARKET_CLOSE = datetime.time(15, 20)
+OPEN_SETTLE = datetime.time(9, 5)      # 시초가 안정 (9:00~9:05 관망)
+GOLDEN_HOUR_END = datetime.time(10, 0)  # 골든타임 종료
+CLOSING_MODE = datetime.time(14, 30)    # 오후 청산 모드 전환
 
 
 @dataclass
@@ -114,8 +117,14 @@ class StockEngine:
         self._last_trade_time: float = 0
         self._last_stop_time: float = 0
         self._min_trade_interval = 120
-        self._stop_lockout = 300
+        self._stop_lockout = 900        # 손절 후 15분 재진입 금지
         self._stock_name = ""
+
+        # 수급/지수 캐시
+        self._supply_cache: Optional[Dict] = None
+        self._supply_cache_time: float = 0
+        self._index_cache: Optional[Dict] = None
+        self._index_cache_time: float = 0
 
     # ── 장 시간 확인 ──
 
@@ -125,6 +134,76 @@ class StockEngine:
         if now.weekday() >= 5:
             return False
         return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+
+    # ── 시간대별 모드 판단 ──
+
+    @staticmethod
+    def get_trading_mode() -> str:
+        """현재 시간대별 트레이딩 모드
+        opening_wait: 9:00~9:05 시초가 안정 대기
+        golden_hour:  9:05~10:00 집중 매매 시간
+        normal:       10:00~14:30 일반 매매
+        closing:      14:30~15:20 신규매수 금지, 청산만
+        closed:       장 외 시간
+        """
+        now = datetime.datetime.now()
+        if now.weekday() >= 5:
+            return "closed"
+        t = now.time()
+        if t < MARKET_OPEN or t > MARKET_CLOSE:
+            return "closed"
+        if t < OPEN_SETTLE:
+            return "opening_wait"
+        if t < GOLDEN_HOUR_END:
+            return "golden_hour"
+        if t < CLOSING_MODE:
+            return "normal"
+        return "closing"
+
+    # ── 시장 환경 필터 ──
+
+    def _check_market_conditions(self) -> tuple:
+        """시장 환경 체크. (통과 여부, 사유) 반환."""
+        now = time.time()
+
+        # 지수 체크 (60초 캐시)
+        if now - self._index_cache_time > 60:
+            self._index_cache = self.kis.get_index_price("0001")
+            self._index_cache_time = now
+
+        if self._index_cache:
+            idx_change = self._index_cache.get("change_pct", 0)
+            if idx_change <= -1.5:
+                return False, "코스피 급락 (%.1f%%)" % idx_change
+
+        return True, ""
+
+    def _check_supply_demand(self) -> tuple:
+        """수급 확인. (통과 여부, 사유, 상세) 반환."""
+        now = time.time()
+
+        # 수급 캐시 (60초)
+        if now - self._supply_cache_time > 60:
+            self._supply_cache = self.kis.get_investor_trend(self.stock_code)
+            self._supply_cache_time = now
+
+        if not self._supply_cache:
+            return True, "", {}
+
+        foreign = self._supply_cache.get("foreign_net", 0)
+        institution = self._supply_cache.get("institution_net", 0)
+
+        if foreign < 0 and institution < 0:
+            return False, "외국인(%+d) + 기관(%+d) 동반 매도" % (foreign, institution), self._supply_cache
+
+        return True, "", self._supply_cache
+
+    def _check_volume_power(self) -> tuple:
+        """체결강도 확인. 100 이상이면 매수세 우세."""
+        vp = self.kis.get_volume_power(self.stock_code)
+        if vp > 0 and vp < 80:
+            return False, "체결강도 약세 (%.0f%%)" % vp
+        return True, ""
 
     # ── 데이터 수집 ──
 
@@ -264,7 +343,8 @@ class StockEngine:
     # ── 메인 사이클 ──
 
     def run_once(self):
-        if not self.is_market_open():
+        mode = self.get_trading_mode()
+        if mode == "closed":
             return
 
         df = self._fetch_data()
@@ -288,6 +368,7 @@ class StockEngine:
 
         is_holding = self.position.quantity > 0 and self.position.avg_price > 0
 
+        # ── 보유 중: 손절/익절 (시간대 무관, 항상 실행) ──
         if is_holding:
             self.position.update_highest(price)
             gain_pct = (price - self.position.avg_price) / self.position.avg_price * 100
@@ -312,24 +393,62 @@ class StockEngine:
                 self._sell("트레일링 익절 (최고:%s, 하락:%.1f%%)" % ("{:,}".format(self.position.highest_price), drop))
                 return
 
-        # 쿨다운
+            # 14:30 이후: 보유 중이면 청산 (당일 매매 원칙)
+            if mode == "closing" and gain_pct > 0:
+                self._sell("장마감 전 청산 (+%.1f%%)" % gain_pct)
+                return
+
+        # ── 시간대별 매수 필터 ──
+        if mode == "opening_wait":
+            logger.debug("[%s] 시초가 안정 대기 (9:00~9:05)", self.stock_code)
+            return
+
+        if mode == "closing":
+            logger.debug("[%s] 장마감 모드 - 신규매수 금지", self.stock_code)
+            return
+
+        # ── 쿨다운 체크 ──
         now = time.time()
         if now < self._cooldown_until:
             return
 
+        # ── 전략 분석 ──
         sig = self.strategy.analyze(df)
-        logger.debug("[%s] 가격: %s | %s (%.0f%%) | %s",
-                     self.stock_code, "{:,}".format(price),
-                     sig.signal.value, sig.confidence * 100, sig.reason)
+        logger.debug("[%s] %s | 가격: %s | %s (%.0f%%) | 모드: %s | %s",
+                     self.stock_code, self._stock_name, "{:,}".format(price),
+                     sig.signal.value, sig.confidence * 100, mode, sig.reason)
 
         if not sig.is_actionable:
             return
 
+        # ── 매수 실행 (모든 필터 통과 필요) ──
         if sig.signal == Signal.BUY and not is_holding:
             if now - self._last_trade_time < self._min_trade_interval:
                 return
             if now - self._last_stop_time < self._stop_lockout:
                 return
+
+            # 지수 급락 필터
+            mkt_ok, mkt_reason = self._check_market_conditions()
+            if not mkt_ok:
+                logger.info("[매수 차단] %s - %s", self.stock_code, mkt_reason)
+                self.telegram.send("<b>🚫 매수 차단</b>\n%s %s\n사유: %s"
+                                   % (self.stock_code, self._stock_name, mkt_reason))
+                return
+
+            # 수급 필터 (외국인+기관 동반 매도 시 차단)
+            if self.kis.is_authenticated:
+                sup_ok, sup_reason, sup_data = self._check_supply_demand()
+                if not sup_ok:
+                    logger.info("[매수 차단] %s - %s", self.stock_code, sup_reason)
+                    return
+
+                # 체결강도 필터
+                vp_ok, vp_reason = self._check_volume_power()
+                if not vp_ok:
+                    logger.info("[매수 차단] %s - %s", self.stock_code, vp_reason)
+                    return
+
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
             self._buy(sig.reason, current_atr=atr)
 
@@ -359,7 +478,9 @@ class StockEngine:
         logger.info("  손절: ATR x%.1f (폴백: %.1f%%)", self.atr_stop_multiplier, self.stop_loss_pct)
         logger.info("  익절: +%.1f%%에서 분할 → +%.1f%%부터 트레일링 %.1f%%",
                      self.take_profit_pct * 0.6, self.take_profit_pct, self.trailing_pct)
-        logger.info("  장 운영: 평일 09:00~15:20")
+        logger.info("  손절 후 재진입: 15분 금지")
+        logger.info("  장 운영: 09:00~09:05 관망 → 09:05~10:00 집중 → 14:30 청산모드")
+        logger.info("  필터: 코스피급락차단 + 수급(외인/기관) + 체결강도")
         logger.info("=" * 55)
         self.telegram.notify_start(
             "%s %s" % (self.stock_code, self._stock_name),
