@@ -82,6 +82,8 @@ class TraderEngine:
         max_invest_krw: float = 100_000,
         stop_loss_pct: float = 3.0,
         take_profit_pct: float = 5.0,
+        trailing_pct: float = 2.0,
+        atr_stop_multiplier: float = 2.0,
         candle_count: int = 200,
         telegram_token: str = "",
         telegram_chat_id: str = "",
@@ -90,10 +92,10 @@ class TraderEngine:
         self.interval = interval
         self.invest_ratio = invest_ratio
         self.max_invest_krw = max_invest_krw
-        self.stop_loss_pct = stop_loss_pct       # ATR 손절 불가 시 폴백
-        self.take_profit_pct = take_profit_pct   # 트레일링 활성화 기준
-        self.trailing_pct = 2.0                  # 최고점 대비 이만큼 빠지면 익절
-        self.atr_stop_multiplier = 2.0           # ATR × 이 배수 = 동적 손절폭
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.trailing_pct = trailing_pct
+        self.atr_stop_multiplier = atr_stop_multiplier
         self.candle_count = candle_count
 
         self._upbit: Optional[pyupbit.Upbit] = None
