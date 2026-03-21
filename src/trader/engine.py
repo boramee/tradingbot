@@ -390,7 +390,7 @@ class TraderEngine:
         # 쿨다운 체크
         if self._is_cooled_down():
             remaining = int((self._cooldown_until - time.time()) / 60) + 1
-            logger.info("[쿨다운] %d분 남음 (연속%d손실)", remaining, self._consecutive_losses)
+            logger.debug("[쿨다운] %d분 남음 (연속%d손실)", remaining, self._consecutive_losses)
             return
 
         # 전략 분석
@@ -400,7 +400,7 @@ class TraderEngine:
         if not sig.is_actionable:
             return
         if self._daily_trades >= self._max_daily_trades:
-            logger.info("[제한] 일일 최대 거래 횟수 도달 (%d)", self._max_daily_trades)
+            logger.debug("[제한] 일일 최대 거래 횟수 도달 (%d)", self._max_daily_trades)
             return
 
         now = time.time()
@@ -413,7 +413,7 @@ class TraderEngine:
 
             if now - self._last_stop_loss_time < self._stop_loss_lockout:
                 remaining = int(self._stop_loss_lockout - (now - self._last_stop_loss_time))
-                logger.info("[대기] 손절 후 재진입 금지 (%d초 남음)", remaining)
+                logger.debug("[대기] 손절 후 재진입 금지 (%d초 남음)", remaining)
                 return
 
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
@@ -459,7 +459,7 @@ class TraderEngine:
                 trend = "추세" if adx_val >= 20 else "횡보"
                 adx_str = " | ADX:%.0f(%s)" % (adx_val, trend)
 
-        logger.info(
+        logger.debug(
             "[%s] 가격: %s%s | %s (%.0f%%)%s | %s",
             self.ticker, "{:,.0f}".format(price), adx_str,
             sig.signal.value, sig.confidence * 100,
