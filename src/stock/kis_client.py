@@ -453,6 +453,36 @@ class KISClient:
             logger.debug("[KIS] 지수 조회 실패 [%s]: %s", index_code, e)
             return None
 
+    def get_orderbook_ratio(self, stock_code: str) -> Optional[Dict]:
+        """호가창 매수/매도 잔량비 조회"""
+        try:
+            resp = requests.get(
+                "%s/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn" % self.base_url,
+                headers=self._headers("FHKST01010200"),
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_INPUT_ISCD": stock_code,
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            output = data.get("output1", {})
+            if not output:
+                return None
+
+            total_ask = int(output.get("total_askp_rsqn", 0))
+            total_bid = int(output.get("total_bidp_rsqn", 0))
+            ratio = total_bid / total_ask if total_ask > 0 else 0
+
+            return {
+                "total_ask": total_ask,
+                "total_bid": total_bid,
+                "bid_ask_ratio": ratio,
+            }
+        except Exception as e:
+            logger.debug("[KIS] 호가 잔량 조회 실패 [%s]: %s", stock_code, e)
+            return None
+
     # ── 주문 ──
 
     def buy(self, stock_code: str, quantity: int, price: int = 0) -> Optional[Dict]:

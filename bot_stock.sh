@@ -13,7 +13,7 @@ CODE="${CODE:-005930}"           # 종목코드 (삼성전자)
 STRATEGY="${STRATEGY:-combined}"
 INVEST_RATIO="${INVEST_RATIO:-0.1}"
 MAX_INVEST="${MAX_INVEST:-500000}"
-SCAN="${SCAN:-}"                 # 자동스캔: SCAN=1 ./bot_stock.sh start
+SCAN="${SCAN:-1}"                 # 기본: 자동스캔. 끄려면 SCAN=0
 
 start() {
     if is_running; then
@@ -22,9 +22,12 @@ start() {
         return
     fi
 
+    SCAN_LABEL="자동 스캔"
+    [ "$SCAN" != "1" ] && SCAN_LABEL="고정: $CODE"
+
     echo "============================="
     echo "  주식 자동매매 봇 시작"
-    echo "  종목: $CODE"
+    echo "  모드: $SCAN_LABEL"
     echo "  전략: $STRATEGY"
     echo "  투자비율: ${INVEST_RATIO}"
     echo "  최대투자: ${MAX_INVEST}원"
@@ -33,7 +36,7 @@ start() {
     source "$DIR/venv/bin/activate" 2>/dev/null
 
     SCAN_FLAG=""
-    [ -n "$SCAN" ] && SCAN_FLAG="--auto-scan"
+    [ "$SCAN" = "1" ] && SCAN_FLAG="--auto-scan"
 
     nohup $VENV run_stock.py \
         --code "$CODE" \
@@ -86,8 +89,9 @@ case "${1:-help}" in
     *)
         echo "사용법: ./bot_stock.sh {start|stop|restart|status|log}"
         echo ""
-        echo "  CODE=035720 ./bot_stock.sh start     # 카카오"
-        echo "  CODE=005380 ./bot_stock.sh start     # 현대차"
+        echo "  ./bot_stock.sh start                  # 자동 스캔 (기본)"
+        echo "  SCAN=0 CODE=005930 ./bot_stock.sh start  # 고정 종목"
         echo "  STRATEGY=rsi ./bot_stock.sh restart"
         ;;
+
 esac
