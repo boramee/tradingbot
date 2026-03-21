@@ -27,6 +27,7 @@ from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from .kis_client import KISClient
+from .scanner import StockScanner
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class StockEngine:
         account_prod: str = "01",
         is_virtual: bool = True,
         stock_code: str = "005930",
+        auto_scan: bool = False,
         strategy_name: str = "combined",
         invest_ratio: float = 0.1,
         max_invest_krw: int = 500_000,
@@ -101,10 +103,12 @@ class StockEngine:
         self.trailing_pct = trailing_pct
         self.atr_stop_multiplier = atr_stop_multiplier
 
+        self.auto_scan = auto_scan
         self.kis = KISClient(app_key, app_secret, account_no, account_prod, is_virtual)
         self.indicators = TechnicalIndicators()
         self.adv = AdvancedIndicators()
         self.strategy = STRATEGY_MAP.get(strategy_name.lower(), CombinedStrategy)()
+        self.scanner = StockScanner(self.kis)
         self.position = StockPosition(code=stock_code)
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
         self.trade_logs: List[StockTradeLog] = []
@@ -421,39 +425,90 @@ class StockEngine:
         if not sig.is_actionable:
             return
 
-        # ── 매수 실행 (모든 필터 통과 필요) ──
+        # ── 자동 스캔 모드: 스캐너가 종목 선택 ──
+        if self.auto_scan and not is_holding:
+            self._run_auto_scan(now)
+            return
+
+        # ── 고정 종목 모드: 기존 로직 ──
         if sig.signal == Signal.BUY and not is_holding:
-            if now - self._last_trade_time < self._min_trade_interval:
+            if not self._pre_buy_checks(now):
                 return
-            if now - self._last_stop_time < self._stop_lockout:
-                return
-
-            # 지수 급락 필터
-            mkt_ok, mkt_reason = self._check_market_conditions()
-            if not mkt_ok:
-                logger.info("[매수 차단] %s - %s", self.stock_code, mkt_reason)
-                self.telegram.send("<b>🚫 매수 차단</b>\n%s %s\n사유: %s"
-                                   % (self.stock_code, self._stock_name, mkt_reason))
-                return
-
-            # 수급 필터 (외국인+기관 동반 매도 시 차단)
-            if self.kis.is_authenticated:
-                sup_ok, sup_reason, sup_data = self._check_supply_demand()
-                if not sup_ok:
-                    logger.info("[매수 차단] %s - %s", self.stock_code, sup_reason)
-                    return
-
-                # 체결강도 필터
-                vp_ok, vp_reason = self._check_volume_power()
-                if not vp_ok:
-                    logger.info("[매수 차단] %s - %s", self.stock_code, vp_reason)
-                    return
-
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
             self._buy(sig.reason, current_atr=atr)
 
         elif sig.signal == Signal.SELL and is_holding:
             self._sell(sig.reason)
+
+    def _pre_buy_checks(self, now: float) -> bool:
+        """매수 전 공통 필터 체크"""
+        if now - self._last_trade_time < self._min_trade_interval:
+            return False
+        if now - self._last_stop_time < self._stop_lockout:
+            return False
+
+        mkt_ok, mkt_reason = self._check_market_conditions()
+        if not mkt_ok:
+            logger.info("[매수 차단] %s", mkt_reason)
+            self.telegram.send("<b>🚫 매수 차단</b>\n사유: %s" % mkt_reason)
+            return False
+
+        if self.kis.is_authenticated:
+            sup_ok, sup_reason, _ = self._check_supply_demand()
+            if not sup_ok:
+                logger.info("[매수 차단] %s - %s", self.stock_code, sup_reason)
+                return False
+            vp_ok, vp_reason = self._check_volume_power()
+            if not vp_ok:
+                logger.info("[매수 차단] %s - %s", self.stock_code, vp_reason)
+                return False
+
+        return True
+
+    def _run_auto_scan(self, now: float):
+        """자동 스캔 모드: 스캐너 → 필터 → 전략 확인 → 매수"""
+        if not self._pre_buy_checks(now):
+            return
+
+        best = self.scanner.get_best()
+        if not best:
+            return
+
+        # 스캔된 종목의 차트 분석
+        df = self.kis.get_ohlcv(best.code, period="D", count=60)
+        if df is None or len(df) < 20:
+            return
+
+        df = self.indicators.add_all(df)
+        sig = self.strategy.analyze(df)
+
+        if sig.signal != Signal.BUY or not sig.is_actionable:
+            logger.debug("[스캐너] %s %s 차트 신호 부적합 (%s)", best.code, best.name, sig.reason)
+            return
+
+        # 종목 전환
+        old_code = self.stock_code
+        self.stock_code = best.code
+        self._stock_name = best.name
+
+        atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
+        scan_reason = "스캐너 선정 (점수:%.0f, %s) + %s" % (best.score, ", ".join(best.reasons), sig.reason)
+
+        if self._buy(scan_reason, current_atr=atr):
+            self.scanner.exclude(best.code)
+            logger.info("[스캐너] 종목 선정: %s", best.summary())
+            if best.sector:
+                self.telegram.send(
+                    "<b>📡 스캐너 종목 선정</b>\n"
+                    "종목: %s %s\n"
+                    "점수: %.0f\n"
+                    "섹터: %s\n"
+                    "사유: %s"
+                    % (best.code, best.name, best.score,
+                       best.sector or "개별", ", ".join(best.reasons))
+                )
+        else:
+            self.stock_code = old_code
 
     def start(self, poll_sec: int = 10):
         self.running = True
@@ -471,7 +526,8 @@ class StockEngine:
 
         logger.info("=" * 55)
         logger.info("  주식 자동매매 봇 시작")
-        logger.info("  종목: %s %s", self.stock_code, self._stock_name)
+        scan_mode = "자동 스캔 (전 종목 탐색)" if self.auto_scan else "고정 종목"
+        logger.info("  종목: %s %s (%s)", self.stock_code, self._stock_name, scan_mode)
         logger.info("  전략: %s | 모드: %s", self.strategy.name, mode)
         logger.info("  투자비율: %.0f%% | 최대: %s원",
                      self.invest_ratio * 100, "{:,}".format(self.max_invest_krw))

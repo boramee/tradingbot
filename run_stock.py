@@ -41,6 +41,8 @@ def main():
     parser.add_argument("--take-profit", type=float, default=3.0, help="익절 기준 (%%)")
     parser.add_argument("--trailing", type=float, default=1.5, help="트레일링 폭 (%%)")
     parser.add_argument("--virtual", action="store_true", help="모의투자 모드 (기본: 실전)")
+    parser.add_argument("--auto-scan", action="store_true",
+                        help="자동 스캔 모드: 거래대금 상위 종목 자동 탐색 및 매매")
     parser.add_argument("--log-level", default="INFO")
 
     args = parser.parse_args()
@@ -53,6 +55,7 @@ def main():
         account_prod=os.getenv("KIS_ACCOUNT_PROD", "01"),
         is_virtual=args.virtual,
         stock_code=args.code,
+        auto_scan=args.auto_scan,
         strategy_name=args.strategy,
         invest_ratio=args.invest_ratio,
         max_invest_krw=args.max_invest,

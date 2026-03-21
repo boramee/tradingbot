@@ -13,6 +13,7 @@ CODE="${CODE:-005930}"           # 종목코드 (삼성전자)
 STRATEGY="${STRATEGY:-combined}"
 INVEST_RATIO="${INVEST_RATIO:-0.1}"
 MAX_INVEST="${MAX_INVEST:-500000}"
+SCAN="${SCAN:-}"                 # 자동스캔: SCAN=1 ./bot_stock.sh start
 
 start() {
     if is_running; then
@@ -31,11 +32,15 @@ start() {
 
     source "$DIR/venv/bin/activate" 2>/dev/null
 
+    SCAN_FLAG=""
+    [ -n "$SCAN" ] && SCAN_FLAG="--auto-scan"
+
     nohup $VENV run_stock.py \
         --code "$CODE" \
         --strategy "$STRATEGY" \
         --invest-ratio "$INVEST_RATIO" \
         --max-invest "$MAX_INVEST" \
+        $SCAN_FLAG \
         > "$LOG" 2>&1 &
 
     echo $! > "$PIDFILE"

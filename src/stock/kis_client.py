@@ -269,6 +269,95 @@ class KISClient:
             logger.error("[KIS] 잔고 조회 실패: %s", e)
             return None
 
+    # ── 전종목/랭킹 조회 ──
+
+    def get_volume_rank(self, market: str = "J", limit: int = 30) -> List[Dict]:
+        """거래대금 상위 종목 조회 (당일 기준)"""
+        try:
+            resp = requests.get(
+                "%s/uapi/domestic-stock/v1/quotations/volume-rank" % self.base_url,
+                headers=self._headers("FHPST01710000"),
+                params={
+                    "FID_COND_MRKT_DIV_CODE": market,
+                    "FID_COND_SCR_DIV_CODE": "20101",
+                    "FID_INPUT_ISCD": "0000",
+                    "FID_DIV_CLS_CODE": "0",
+                    "FID_BLNG_CLS_CODE": "0",
+                    "FID_TRGT_CLS_CODE": "111111111",
+                    "FID_TRGT_EXLS_CLS_CODE": "000000",
+                    "FID_INPUT_PRICE_1": "0",
+                    "FID_INPUT_PRICE_2": "0",
+                    "FID_VOL_CNT": "0",
+                    "FID_INPUT_DATE_1": "",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            items = data.get("output", [])
+            results = []
+            for item in items[:limit]:
+                code = item.get("mksc_shrn_iscd", "")
+                if not code:
+                    continue
+                results.append({
+                    "code": code,
+                    "name": item.get("hts_kor_isnm", ""),
+                    "price": int(item.get("stck_prpr", 0)),
+                    "change_pct": float(item.get("prdy_ctrt", 0)),
+                    "volume": int(item.get("acml_vol", 0)),
+                    "trade_value": int(item.get("acml_tr_pbmn", 0)),
+                })
+            return results
+        except Exception as e:
+            logger.error("[KIS] 거래량 순위 조회 실패: %s", e)
+            return []
+
+    def get_price_change_rank(self, direction: str = "up", limit: int = 20) -> List[Dict]:
+        """등락률 상위 종목 조회. direction: 'up' 또는 'down'"""
+        try:
+            # 상승: 순위=0, 하락: 순위=1
+            rank_code = "0" if direction == "up" else "1"
+            resp = requests.get(
+                "%s/uapi/domestic-stock/v1/ranking/fluctuation" % self.base_url,
+                headers=self._headers("FHPST01700000"),
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_COND_SCR_DIV_CODE": "20170",
+                    "FID_INPUT_ISCD": "0000",
+                    "FID_RANK_SORT_CLS_CODE": rank_code,
+                    "FID_INPUT_CNT_1": "0",
+                    "FID_PRC_CLS_CODE": "0",
+                    "FID_INPUT_PRICE_1": "0",
+                    "FID_INPUT_PRICE_2": "0",
+                    "FID_VOL_CNT": "0",
+                    "FID_TRGT_CLS_CODE": "0",
+                    "FID_TRGT_EXLS_CLS_CODE": "0",
+                    "FID_DIV_CLS_CODE": "0",
+                    "FID_RSFL_RATE1": "",
+                    "FID_RSFL_RATE2": "",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            items = data.get("output", [])
+            results = []
+            for item in items[:limit]:
+                code = item.get("stck_shrn_iscd", item.get("mksc_shrn_iscd", ""))
+                if not code:
+                    continue
+                results.append({
+                    "code": code,
+                    "name": item.get("hts_kor_isnm", ""),
+                    "price": int(item.get("stck_prpr", 0)),
+                    "change_pct": float(item.get("prdy_ctrt", 0)),
+                    "volume": int(item.get("acml_vol", 0)),
+                    "trade_value": int(item.get("acml_tr_pbmn", 0)),
+                })
+            return results
+        except Exception as e:
+            logger.debug("[KIS] 등락률 순위 조회 실패: %s", e)
+            return []
+
     # ── 수급/체결강도/지수 조회 ──
 
     def get_investor_trend(self, stock_code: str) -> Optional[Dict]:
