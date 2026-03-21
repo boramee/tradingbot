@@ -118,8 +118,10 @@ class TraderEngine:
         self._max_consecutive_losses = 3
         self._cooldown_until: float = 0       # 쿨다운 종료 시각
         self._cooldown_minutes = 10           # 연속 손실 후 대기 시간(분)
-        self._htf_update_interval = 300       # 상위TF 갱신 주기(초)
+        self._htf_update_interval = 300
         self._htf_last_update: float = 0
+        self._last_alert_reason: str = ""     # 중복 알림 방지
+        self._last_alert_time: float = 0
 
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
@@ -164,7 +166,17 @@ class TraderEngine:
         krw = self._get_krw_balance()
         amount = min(krw * self.invest_ratio, self.max_invest_krw)
         if amount < 5000:
-            logger.info("[매수 불가] 잔고 부족: %.0f원", krw)
+            logger.info("[매수 불가] 잔고 부족: %.0f원 (투자금: %.0f원 < 최소 5,000원)", krw, amount)
+            self._alert_once(
+                "잔고부족",
+                "<b>⚠️ 매수 불가</b>\n"
+                "사유: 잔고 부족\n"
+                "KRW 잔고: %s원\n"
+                "투자금: %s × %.0f%% = %s원 (최소 5,000원)\n"
+                "신호: %s"
+                % ("{:,.0f}".format(krw), "{:,.0f}".format(krw),
+                   self.invest_ratio * 100, "{:,.0f}".format(amount), reason),
+            )
             return False
 
         price = self._get_current_price()
@@ -221,6 +233,7 @@ class TraderEngine:
                 self.telegram.notify_sell(self.ticker, price, pnl_pct, tag + " " + reason)
             else:
                 logger.error("[매도 실패] %s", result)
+                self.telegram.notify_error("매도 실패: %s\n코인: %s" % (result, self.ticker))
                 return False
         else:
             self._daily_trades += 1
@@ -252,6 +265,15 @@ class TraderEngine:
                 )
         else:
             self._consecutive_losses = 0
+
+    def _alert_once(self, key: str, message: str, cooldown_sec: int = 300):
+        """같은 종류의 알림은 5분에 1번만 전송"""
+        now = time.time()
+        if key == self._last_alert_reason and (now - self._last_alert_time) < cooldown_sec:
+            return
+        self._last_alert_reason = key
+        self._last_alert_time = now
+        self.telegram.send(message)
 
     def _is_cooled_down(self) -> bool:
         if time.time() < self._cooldown_until:
