@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--stop-loss", type=float, default=2.0, help="손절 (%%)")
     parser.add_argument("--take-profit", type=float, default=3.0, help="익절 기준 (%%)")
     parser.add_argument("--trailing", type=float, default=1.5, help="트레일링 폭 (%%)")
-    parser.add_argument("--real", action="store_true", help="실전 모드 (기본: 모의투자)")
+    parser.add_argument("--virtual", action="store_true", help="모의투자 모드 (기본: 실전)")
     parser.add_argument("--log-level", default="INFO")
 
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main():
         app_secret=os.getenv("KIS_APP_SECRET", ""),
         account_no=os.getenv("KIS_ACCOUNT_NO", ""),
         account_prod=os.getenv("KIS_ACCOUNT_PROD", "01"),
-        is_virtual=not args.real,
+        is_virtual=args.virtual,
         stock_code=args.code,
         strategy_name=args.strategy,
         invest_ratio=args.invest_ratio,
