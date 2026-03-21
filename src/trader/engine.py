@@ -37,8 +37,9 @@ class Position:
     avg_price: float = 0.0
     volume: float = 0.0
     entry_time: float = 0.0
-    highest_price: float = 0.0  # 보유 중 최고가 (트레일링 스톱용)
-    entry_atr: float = 0.0      # 진입 시점 ATR (동적 손절용)
+    highest_price: float = 0.0
+    entry_atr: float = 0.0
+    partial_sold: bool = False   # 1차 분할매도 완료 여부
 
     @property
     def is_holding(self) -> bool:
@@ -96,6 +97,8 @@ class TraderEngine:
         self.take_profit_pct = take_profit_pct
         self.trailing_pct = trailing_pct
         self.atr_stop_multiplier = atr_stop_multiplier
+        self.partial_exit_pct = 50.0          # 1차 분할매도 비율 (%)
+        self.partial_trigger_pct = None       # take_profit_pct의 60%에서 1차 매도
         self.candle_count = candle_count
 
         self._upbit: Optional[pyupbit.Upbit] = None
@@ -110,7 +113,13 @@ class TraderEngine:
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
 
         self._daily_trades = 0
-        self._max_daily_trades = 10
+        self._max_daily_trades = 20
+        self._consecutive_losses = 0
+        self._max_consecutive_losses = 3
+        self._cooldown_until: float = 0       # 쿨다운 종료 시각
+        self._cooldown_minutes = 10           # 연속 손실 후 대기 시간(분)
+        self._htf_update_interval = 300       # 상위TF 갱신 주기(초)
+        self._htf_last_update: float = 0
 
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
@@ -187,31 +196,70 @@ class TraderEngine:
             return True
         return False
 
-    def _sell(self, reason: str) -> bool:
-        volume = self._get_coin_balance() if self._upbit else self.position.volume
-        if volume <= 0:
+    def _sell(self, reason: str, partial: bool = False) -> bool:
+        """전량 매도 또는 분할 매도"""
+        full_volume = self._get_coin_balance() if self._upbit else self.position.volume
+        if full_volume <= 0:
             return False
+
+        if partial:
+            sell_volume = full_volume * (self.partial_exit_pct / 100)
+        else:
+            sell_volume = full_volume
 
         price = self._get_current_price()
         pnl_pct = (price - self.position.avg_price) / self.position.avg_price * 100 if self.position.avg_price > 0 else 0
 
+        tag = "[분할매도]" if partial else "[매도]"
+
         if self._upbit:
-            result = self._upbit.sell_market_order(self.ticker, volume)
+            result = self._upbit.sell_market_order(self.ticker, sell_volume)
             if result and "error" not in result:
                 self._daily_trades += 1
-                self.trade_logs.append(TradeLog(time.time(), "SELL", price, volume * price, reason, pnl_pct))
-                logger.info("[매도] %s | 수익률: %+.2f%% | %s", self.ticker, pnl_pct, reason)
-                self.telegram.notify_sell(self.ticker, price, pnl_pct, reason)
-                self.position = Position(ticker=self.ticker)
-                return True
-            logger.error("[매도 실패] %s", result)
+                self.trade_logs.append(TradeLog(time.time(), "SELL", price, sell_volume * price, reason, pnl_pct))
+                logger.info("%s %s | 수익률: %+.2f%% | %s", tag, self.ticker, pnl_pct, reason)
+                self.telegram.notify_sell(self.ticker, price, pnl_pct, tag + " " + reason)
+            else:
+                logger.error("[매도 실패] %s", result)
+                return False
         else:
             self._daily_trades += 1
-            self.trade_logs.append(TradeLog(time.time(), "SELL", price, volume * price, reason, pnl_pct))
-            logger.info("[시뮬] 매도: 수익률 %+.2f%% | %s", pnl_pct, reason)
-            self.telegram.notify_sell(self.ticker, price, pnl_pct, "[시뮬] " + reason)
+            self.trade_logs.append(TradeLog(time.time(), "SELL", price, sell_volume * price, reason, pnl_pct))
+            logger.info("[시뮬] %s 수익률 %+.2f%% | %s", tag, pnl_pct, reason)
+            self.telegram.notify_sell(self.ticker, price, pnl_pct, "[시뮬]" + tag + " " + reason)
+
+        if partial:
+            self.position.volume = full_volume - sell_volume
+            self.position.partial_sold = True
+        else:
+            self._track_loss(pnl_pct)
             self.position = Position(ticker=self.ticker)
+        return True
+
+    def _track_loss(self, pnl_pct: float):
+        """연속 손실 추적 및 쿨다운 발동"""
+        if pnl_pct < 0:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= self._max_consecutive_losses:
+                self._cooldown_until = time.time() + self._cooldown_minutes * 60
+                logger.warning(
+                    "[쿨다운] %d연속 손실 → %d분 매매 중지",
+                    self._consecutive_losses, self._cooldown_minutes,
+                )
+                self.telegram.send(
+                    "<b>⏸ 쿨다운 발동</b>\n%d연속 손실 → %d분 대기"
+                    % (self._consecutive_losses, self._cooldown_minutes)
+                )
+        else:
+            self._consecutive_losses = 0
+
+    def _is_cooled_down(self) -> bool:
+        if time.time() < self._cooldown_until:
             return True
+        if self._cooldown_until > 0 and time.time() >= self._cooldown_until:
+            self._cooldown_until = 0
+            self._consecutive_losses = 0
+            logger.info("[쿨다운 해제] 매매 재개")
         return False
 
     # ── 손절/익절 ──
@@ -272,6 +320,9 @@ class TraderEngine:
         df = self.indicators.add_all(df)
         current_price = self._get_current_price()
 
+        # 상위 타임프레임 갱신 (5분마다)
+        self._update_higher_timeframe()
+
         # 포지션 동기화 (API 키 있을 때)
         if self._upbit:
             self.position.volume = self._get_coin_balance()
@@ -279,10 +330,12 @@ class TraderEngine:
 
         is_holding = self.position.volume > 0 and self.position.avg_price > 0
 
-        # 최고가 갱신 + 손절/익절 체크
+        # 최고가 갱신 + 손절/분할매도/트레일링 체크
         if is_holding:
             self.position.update_highest(current_price)
+            gain_pct = (current_price - self.position.avg_price) / self.position.avg_price * 100
 
+            # 손절 (최우선)
             if self._check_stop_loss(current_price):
                 detail = self._get_stop_loss_detail(current_price)
                 loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
@@ -290,12 +343,27 @@ class TraderEngine:
                 self._sell(detail)
                 return
 
+            # 분할매도: 익절 기준의 60% 도달 시 50% 매도
+            partial_trigger = self.take_profit_pct * 0.6
+            if not self.position.partial_sold and gain_pct >= partial_trigger:
+                self._sell(
+                    "1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, partial_trigger),
+                    partial=True,
+                )
+                return
+
+            # 트레일링 스톱 (나머지 물량)
             if self._check_trailing_stop(current_price):
                 detail = self._get_trailing_detail(current_price)
-                gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
-                self.telegram.notify_take_profit(self.ticker, current_price, gain)
+                self.telegram.notify_take_profit(self.ticker, current_price, gain_pct)
                 self._sell(detail)
                 return
+
+        # 쿨다운 체크
+        if self._is_cooled_down():
+            remaining = int((self._cooldown_until - time.time()) / 60) + 1
+            logger.info("[쿨다운] %d분 남음 (연속%d손실)", remaining, self._consecutive_losses)
+            return
 
         # 전략 분석
         sig = self.strategy.analyze(df)
@@ -312,6 +380,24 @@ class TraderEngine:
             self._buy(sig.reason, current_atr=atr)
         elif sig.signal == Signal.SELL and is_holding:
             self._sell(sig.reason)
+
+    def _update_higher_timeframe(self):
+        """상위 타임프레임 추세를 주기적으로 갱신"""
+        now = time.time()
+        if now - self._htf_last_update < self._htf_update_interval:
+            return
+        self._htf_last_update = now
+        if hasattr(self.strategy, "set_higher_timeframe"):
+            htf_map = {
+                "minute1": "minute15",
+                "minute3": "minute30",
+                "minute5": "minute60",
+                "minute15": "minute60",
+                "minute30": "day",
+                "minute60": "day",
+            }
+            htf_interval = htf_map.get(self.interval, "day")
+            self.strategy.set_higher_timeframe(self.ticker, htf_interval)
 
     def _log_status(self, price: float, sig: TradeSignal, holding: bool, df=None):
         extra = ""
@@ -354,7 +440,9 @@ class TraderEngine:
         logger.info("  투자비율: %.0f%% | 최대: %s원",
                      self.invest_ratio * 100, "{:,.0f}".format(self.max_invest_krw))
         logger.info("  손절: ATR x%.1f (폴백: %.1f%%)", self.atr_stop_multiplier, self.stop_loss_pct)
-        logger.info("  익절: +%.1f%% 도달 후 트레일링 %.1f%%", self.take_profit_pct, self.trailing_pct)
+        logger.info("  익절: +%.1f%%에서 50%%분할매도 → +%.1f%%부터 트레일링 %.1f%%",
+                     self.take_profit_pct * 0.6, self.take_profit_pct, self.trailing_pct)
+        logger.info("  보호: 연속%d손실 시 %d분 쿨다운", self._max_consecutive_losses, self._cooldown_minutes)
         mode = "실거래" if self._upbit else "시뮬레이션"
         logger.info("  주기: %d초 | API: %s", poll_sec, mode)
         logger.info("=" * 55)
