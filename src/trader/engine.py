@@ -120,8 +120,12 @@ class TraderEngine:
         self._cooldown_minutes = 10           # 연속 손실 후 대기 시간(분)
         self._htf_update_interval = 300
         self._htf_last_update: float = 0
-        self._last_alert_reason: str = ""     # 중복 알림 방지
+        self._last_alert_reason: str = ""
         self._last_alert_time: float = 0
+        self._last_trade_time: float = 0      # 마지막 매매 시각
+        self._min_trade_interval = 60         # 매매 간 최소 간격(초)
+        self._last_stop_loss_time: float = 0  # 마지막 손절 시각
+        self._stop_loss_lockout = 180         # 손절 후 재진입 금지(초)
 
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
@@ -363,6 +367,8 @@ class TraderEngine:
                 loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
                 self.telegram.notify_stop_loss(self.ticker, current_price, loss)
                 self._sell(detail)
+                self._last_stop_loss_time = time.time()
+                self._last_trade_time = time.time()
                 return
 
             # 분할매도: 익절 기준의 60% 도달 시 50% 매도
@@ -397,11 +403,26 @@ class TraderEngine:
             logger.info("[제한] 일일 최대 거래 횟수 도달 (%d)", self._max_daily_trades)
             return
 
+        now = time.time()
+
         if sig.signal == Signal.BUY and not is_holding:
+            if now - self._last_trade_time < self._min_trade_interval:
+                remaining = int(self._min_trade_interval - (now - self._last_trade_time))
+                logger.debug("[대기] 매매 간격 제한 (%d초 남음)", remaining)
+                return
+
+            if now - self._last_stop_loss_time < self._stop_loss_lockout:
+                remaining = int(self._stop_loss_lockout - (now - self._last_stop_loss_time))
+                logger.info("[대기] 손절 후 재진입 금지 (%d초 남음)", remaining)
+                return
+
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
-            self._buy(sig.reason, current_atr=atr)
+            if self._buy(sig.reason, current_atr=atr):
+                self._last_trade_time = now
+
         elif sig.signal == Signal.SELL and is_holding:
-            self._sell(sig.reason)
+            if self._sell(sig.reason):
+                self._last_trade_time = now
 
     def _update_higher_timeframe(self):
         """상위 타임프레임 추세를 주기적으로 갱신"""

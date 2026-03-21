@@ -34,8 +34,8 @@ from src.trader.engine import TraderEngine
 
 PRESETS = {
     "scalp": {
-        "candle": "minute1",
-        "interval": 3,
+        "candle": "minute3",
+        "interval": 5,
         "strategy": "rsi",
         "invest_ratio": 0.05,
         "stop_loss": 1.5,
