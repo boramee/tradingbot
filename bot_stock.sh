@@ -38,12 +38,16 @@ start() {
     SCAN_FLAG=""
     [ "$SCAN" = "1" ] && SCAN_FLAG="--auto-scan"
 
+    VIRTUAL_FLAG="--virtual"
+    [ "$REAL" = "1" ] && VIRTUAL_FLAG=""
+
     nohup $VENV run_stock.py \
         --code "$CODE" \
         --strategy "$STRATEGY" \
         --invest-ratio "$INVEST_RATIO" \
         --max-invest "$MAX_INVEST" \
         $SCAN_FLAG \
+        $VIRTUAL_FLAG \
         > "$LOG" 2>&1 &
 
     echo $! > "$PIDFILE"
