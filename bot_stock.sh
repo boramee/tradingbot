@@ -22,13 +22,20 @@ start() {
         return
     fi
 
-    SCAN_LABEL="자동 스캔"
-    [ "$SCAN" != "1" ] && SCAN_LABEL="고정: $CODE"
+    if [ "$SCAN" = "1" ]; then
+        SCAN_LABEL="자동 스캔 (스캐너가 종목 선택)"
+    else
+        SCAN_LABEL="고정 종목: $CODE"
+    fi
+
+    TRADE_MODE="모의투자"
+    [ "$REAL" = "1" ] && TRADE_MODE="실전"
 
     echo "============================="
     echo "  주식 자동매매 봇 시작"
-    echo "  모드: $SCAN_LABEL"
+    echo "  종목: $SCAN_LABEL"
     echo "  전략: $STRATEGY"
+    echo "  모드: $TRADE_MODE"
     echo "  투자비율: ${INVEST_RATIO}"
     echo "  최대투자: ${MAX_INVEST}원"
     echo "============================="
@@ -41,8 +48,11 @@ start() {
     VIRTUAL_FLAG="--virtual"
     [ "$REAL" = "1" ] && VIRTUAL_FLAG=""
 
+    CODE_FLAG="--code $CODE"
+    [ "$SCAN" = "1" ] && CODE_FLAG=""
+
     nohup $VENV run_stock.py \
-        --code "$CODE" \
+        $CODE_FLAG \
         --strategy "$STRATEGY" \
         --invest-ratio "$INVEST_RATIO" \
         --max-invest "$MAX_INVEST" \
