@@ -6,30 +6,34 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 
 case "${1:-status}" in
     start)
-        echo "===== 코인 봇 시작 ====="
+        echo "===== 코인 봇 시작 (24시간) ====="
         "$DIR/bot_btc.sh" start
         "$DIR/bot_eth.sh" start
         "$DIR/bot_xrp.sh" start
         echo ""
-        echo "===== 재정거래 봇 시작 ====="
+        echo "===== 재정거래 봇 시작 (24시간) ====="
         "$DIR/bot_arb.sh" start
         echo ""
-        echo "===== 미국 주식 봇 시작 ====="
+        echo "===== 국내주식 봇 시작 (09:05~15:20) ====="
+        "$DIR/bot_stock.sh" start
+        echo ""
+        echo "===== 미국주식 봇 시작 (22:30~06:00) ====="
         "$DIR/bot_us.sh" start
         echo ""
         echo "===== 전체 시작 완료 ====="
         echo ""
-        echo "  코인: BTC/ETH/XRP (24시간)"
-        echo "  재정: 업비트↔바이낸스 (24시간)"
-        echo "  미국: AAPL/NVDA/TSLA (밤 22:30~06:00)"
-        echo "  국내: ./bot_stock.sh start (별도 실행)"
-        echo "  상태: ./bot_all.sh status"
+        echo "  코인:   BTC/ETH/XRP (24시간)"
+        echo "  재정:   업비트↔바이낸스 (24시간)"
+        echo "  국내주식: 자동스캔 단타 (09:05~15:20)"
+        echo "  미국주식: AAPL/NVDA/TSLA (22:30~06:00)"
+        echo "  상태:   ./bot_all.sh status"
         ;;
     stop)
         "$DIR/bot_btc.sh" stop
         "$DIR/bot_eth.sh" stop
         "$DIR/bot_xrp.sh" stop
         "$DIR/bot_arb.sh" stop
+        "$DIR/bot_stock.sh" stop
         "$DIR/bot_us.sh" stop
         echo "전체 종료 완료"
         ;;
@@ -39,19 +43,22 @@ case "${1:-status}" in
         "$DIR/bot_all.sh" start
         ;;
     status)
-        echo "=== BTC (MACD/스윙) ==="
+        echo "=== BTC (MACD/15분봉) ==="
         "$DIR/bot_btc.sh" status
         echo ""
-        echo "=== ETH (MACD/스윙) ==="
+        echo "=== ETH (MACD/15분봉) ==="
         "$DIR/bot_eth.sh" status
         echo ""
-        echo "=== XRP (볼린저/스윙) ==="
+        echo "=== XRP (볼린저/15분봉) ==="
         "$DIR/bot_xrp.sh" status
         echo ""
         echo "=== 재정거래 (업비트↔바이낸스) ==="
         "$DIR/bot_arb.sh" status
         echo ""
-        echo "=== 미국주식 (AAPL/NVDA/TSLA) ==="
+        echo "=== 국내주식 (자동스캔/MACD/단타) ==="
+        "$DIR/bot_stock.sh" status
+        echo ""
+        echo "=== 미국주식 (볼린저/AAPL,NVDA,TSLA) ==="
         "$DIR/bot_us.sh" status
         ;;
     *)
