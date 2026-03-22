@@ -531,3 +531,188 @@ class KISClient:
         except Exception as e:
             logger.error("[KIS] %s 주문 오류: %s", side.upper(), e)
             return {"success": False, "error": str(e)}
+
+    # ══════════════════════════════════════
+    #  해외주식 (미국/나스닥/NYSE)
+    # ══════════════════════════════════════
+
+    EXCD_MAP = {
+        "NASDAQ": "NAS", "NYSE": "NYS", "AMEX": "AMS",
+        "NAS": "NAS", "NYS": "NYS", "AMS": "AMS",
+    }
+
+    def us_get_current_price(self, symbol: str, exchange: str = "NAS") -> Optional[Dict]:
+        """미국 주식 현재가 조회"""
+        excd = self.EXCD_MAP.get(exchange.upper(), "NAS")
+        try:
+            resp = requests.get(
+                "%s/uapi/overseas-price/v1/quotations/price" % self.base_url,
+                headers=self._headers("HHDFS00000300"),
+                params={"AUTH": "", "EXCD": excd, "SYMB": symbol},
+                timeout=10,
+            )
+            data = resp.json()
+            output = data.get("output", {})
+            if not output:
+                return None
+            return {
+                "price": float(output.get("last", 0)),
+                "open": float(output.get("open", 0)),
+                "high": float(output.get("high", 0)),
+                "low": float(output.get("low", 0)),
+                "volume": int(float(output.get("tvol", 0))),
+                "change_pct": float(output.get("rate", 0)),
+                "name": output.get("rsym", symbol),
+            }
+        except Exception as e:
+            logger.error("[KIS-US] 현재가 조회 실패 [%s]: %s", symbol, e)
+            return None
+
+    def us_get_ohlcv(
+        self, symbol: str, exchange: str = "NAS",
+        period: str = "D", count: int = 100,
+    ) -> Optional[pd.DataFrame]:
+        """미국 주식 일봉 OHLCV 조회"""
+        excd = self.EXCD_MAP.get(exchange.upper(), "NAS")
+        try:
+            import datetime
+            end_date = datetime.date.today().strftime("%Y%m%d")
+
+            resp = requests.get(
+                "%s/uapi/overseas-price/v1/quotations/dailyprice" % self.base_url,
+                headers=self._headers("HHDFS76240000"),
+                params={
+                    "AUTH": "",
+                    "EXCD": excd,
+                    "SYMB": symbol,
+                    "GUBN": "0",
+                    "BYMD": end_date,
+                    "MODP": "1",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            items = data.get("output2", [])
+            if not items:
+                return None
+
+            rows = []
+            for item in items:
+                if not item.get("xymd"):
+                    continue
+                o = float(item.get("open", 0))
+                h = float(item.get("high", 0))
+                l = float(item.get("low", 0))
+                c = float(item.get("clos", 0))
+                v = int(float(item.get("tvol", 0)))
+                if c <= 0:
+                    continue
+                rows.append({
+                    "date": item["xymd"],
+                    "open": o, "high": h, "low": l, "close": c, "volume": v,
+                })
+
+            if not rows:
+                return None
+
+            df = pd.DataFrame(rows)
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").sort_index()
+            return df.tail(count)
+        except Exception as e:
+            logger.error("[KIS-US] OHLCV 조회 실패 [%s]: %s", symbol, e)
+            return None
+
+    def us_get_balance(self) -> Optional[Dict]:
+        """해외주식 잔고 조회"""
+        try:
+            tr_id = "VTTS3012R" if self.is_virtual else "TTTS3012R"
+            resp = requests.get(
+                "%s/uapi/overseas-stock/v1/trading/inquire-balance" % self.base_url,
+                headers=self._headers(tr_id),
+                params={
+                    "CANO": self.account_no,
+                    "ACNT_PRDT_CD": self.account_prod,
+                    "OVRS_EXCG_CD": "NASD",
+                    "TR_CRCY_CD": "USD",
+                    "CTX_AREA_FK200": "",
+                    "CTX_AREA_NK200": "",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+
+            holdings = []
+            for item in data.get("output1", []):
+                qty = int(float(item.get("ovrs_cblc_qty", 0)))
+                if qty > 0:
+                    holdings.append({
+                        "symbol": item.get("ovrs_pdno", ""),
+                        "name": item.get("ovrs_item_name", ""),
+                        "quantity": qty,
+                        "avg_price": float(item.get("pchs_avg_pric", 0)),
+                        "current_price": float(item.get("now_pric2", 0)),
+                        "pnl_pct": float(item.get("evlu_pfls_rt", 0)),
+                    })
+
+            output2 = data.get("output2", {})
+            if isinstance(output2, list):
+                output2 = output2[0] if output2 else {}
+
+            return {
+                "cash_usd": float(output2.get("frcr_pchs_psbl_amt", 0)),
+                "total_eval_usd": float(output2.get("tot_evlu_pfls_amt", 0)),
+                "holdings": holdings,
+            }
+        except Exception as e:
+            logger.error("[KIS-US] 잔고 조회 실패: %s", e)
+            return None
+
+    def us_buy(self, symbol: str, quantity: int, exchange: str = "NAS", price: float = 0) -> Optional[Dict]:
+        """미국 주식 매수"""
+        tr_id = "VTTT1002U" if self.is_virtual else "JTTT1002U"
+        excd = self.EXCD_MAP.get(exchange.upper(), "NASD")
+        ord_type = "00" if price > 0 else "31"  # 00=지정가, 31=시장가(MOC)
+        return self._us_order(tr_id, symbol, excd, "buy", ord_type, quantity, price)
+
+    def us_sell(self, symbol: str, quantity: int, exchange: str = "NAS", price: float = 0) -> Optional[Dict]:
+        """미국 주식 매도"""
+        tr_id = "VTTT1001U" if self.is_virtual else "JTTT1006U"
+        excd = self.EXCD_MAP.get(exchange.upper(), "NASD")
+        ord_type = "00" if price > 0 else "31"
+        return self._us_order(tr_id, symbol, excd, "sell", ord_type, quantity, price)
+
+    def _us_order(
+        self, tr_id: str, symbol: str, excd: str,
+        side: str, ord_type: str, quantity: int, price: float,
+    ) -> Optional[Dict]:
+        try:
+            body = {
+                "CANO": self.account_no,
+                "ACNT_PRDT_CD": self.account_prod,
+                "OVRS_EXCG_CD": excd,
+                "PDNO": symbol,
+                "ORD_QTY": str(quantity),
+                "OVRS_ORD_UNPR": "%.2f" % price if price > 0 else "0",
+                "ORD_SVR_DVSN_CD": "0",
+                "ORD_DVSN": ord_type,
+            }
+            resp = requests.post(
+                "%s/uapi/overseas-stock/v1/trading/order" % self.base_url,
+                headers=self._headers(tr_id),
+                json=body,
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("rt_cd") == "0":
+                order_no = data.get("output", {}).get("ODNO", "")
+                logger.info("[KIS-US] %s 완료: %s %d주 (주문번호: %s)",
+                            side.upper(), symbol, quantity, order_no)
+                return {"success": True, "order_no": order_no}
+            else:
+                msg = data.get("msg1", "알 수 없는 오류")
+                logger.error("[KIS-US] %s 실패: %s", side.upper(), msg)
+                return {"success": False, "error": msg}
+        except Exception as e:
+            logger.error("[KIS-US] %s 오류: %s", side.upper(), e)
+            return {"success": False, "error": str(e)}

@@ -14,13 +14,15 @@ case "${1:-status}" in
         echo "===== 재정거래 봇 시작 ====="
         "$DIR/bot_arb.sh" start
         echo ""
+        echo "===== 미국 주식 봇 시작 ====="
+        "$DIR/bot_us.sh" start
+        echo ""
         echo "===== 전체 시작 완료 ====="
         echo ""
-        echo "로그 확인:"
-        echo "  BTC:  ./bot_btc.sh log"
-        echo "  ETH:  ./bot_eth.sh log"
-        echo "  XRP:  ./bot_xrp.sh log"
-        echo "  재정: ./bot_arb.sh log"
+        echo "  코인: BTC/ETH/XRP (24시간)"
+        echo "  재정: 업비트↔바이낸스 (24시간)"
+        echo "  미국: AAPL/NVDA/TSLA (밤 22:30~06:00)"
+        echo "  국내: ./bot_stock.sh start (별도 실행)"
         echo "  상태: ./bot_all.sh status"
         ;;
     stop)
@@ -28,6 +30,7 @@ case "${1:-status}" in
         "$DIR/bot_eth.sh" stop
         "$DIR/bot_xrp.sh" stop
         "$DIR/bot_arb.sh" stop
+        "$DIR/bot_us.sh" stop
         echo "전체 종료 완료"
         ;;
     restart)
@@ -47,6 +50,9 @@ case "${1:-status}" in
         echo ""
         echo "=== 재정거래 (업비트↔바이낸스) ==="
         "$DIR/bot_arb.sh" status
+        echo ""
+        echo "=== 미국주식 (AAPL/NVDA/TSLA) ==="
+        "$DIR/bot_us.sh" status
         ;;
     *)
         echo "사용법: ./bot_all.sh {start|stop|restart|status}"
