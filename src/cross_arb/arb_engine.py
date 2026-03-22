@@ -107,6 +107,8 @@ class CrossArbEngine:
 
         self.fx = FXRateProvider()
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
+        self._trade_logger = __import__("src.utils.safety", fromlist=["TradeLogger"]).TradeLogger()
+        self._kill_switch = __import__("src.utils.safety", fromlist=["KillSwitch"]).KillSwitch(max_daily_loss_pct=5.0)
         self.running = False
         self.trade_logs: List[ArbTradeLog] = []
         self._daily_pnl_usdt = 0.0
@@ -192,11 +194,62 @@ class CrossArbEngine:
 
         return None
 
+    def _check_orderbook_depth(self, coin: str, side: str, amount_usdt: float) -> bool:
+        """호가창 5단계 이내에서 물량 소화 가능한지 확인"""
+        try:
+            if side == "binance_buy":
+                ob = self._binance.fetch_order_book("%s/USDT" % coin, limit=5)
+                asks = ob.get("asks", [])
+                total = sum(float(a[0]) * float(a[1]) for a in asks[:5])
+                return total >= amount_usdt
+
+            elif side == "binance_sell":
+                ob = self._binance.fetch_order_book("%s/USDT" % coin, limit=5)
+                bids = ob.get("bids", [])
+                total = sum(float(b[0]) * float(b[1]) for b in bids[:5])
+                return total >= amount_usdt
+
+            elif side == "upbit_buy":
+                ob = pyupbit.get_orderbook("KRW-%s" % coin)
+                if not ob:
+                    return False
+                data = ob[0] if isinstance(ob, list) else ob
+                units = data.get("orderbook_units", [])[:5]
+                total = sum(float(u["ask_price"]) * float(u["ask_size"]) for u in units)
+                return total >= amount_usdt * self.fx.get_krw_per_usdt()
+
+            elif side == "upbit_sell":
+                ob = pyupbit.get_orderbook("KRW-%s" % coin)
+                if not ob:
+                    return False
+                data = ob[0] if isinstance(ob, list) else ob
+                units = data.get("orderbook_units", [])[:5]
+                total = sum(float(u["bid_price"]) * float(u["bid_size"]) for u in units)
+                return total >= amount_usdt * self.fx.get_krw_per_usdt()
+
+        except Exception as e:
+            logger.debug("호가 깊이 확인 실패: %s", e)
+        return True  # 조회 실패 시 일단 진행
+
     # ── 매매 실행 ──
 
     def _execute(self, opp: ArbOpportunity) -> bool:
         """동시 매수/매도 실행"""
+        if self._kill_switch.is_killed():
+            return False
+
         coin = opp.coin
+        trade_usdt = min(self.max_trade_krw / opp.fx_rate, 1000)
+
+        # 호가 깊이 체크
+        buy_side = "%s_buy" % opp.buy_exchange
+        sell_side = "%s_sell" % opp.sell_exchange
+        if not self._check_orderbook_depth(coin, buy_side, trade_usdt):
+            logger.info("[호가부족] %s 매수 호가 5단계 물량 부족", opp.buy_exchange)
+            return False
+        if not self._check_orderbook_depth(coin, sell_side, trade_usdt):
+            logger.info("[호가부족] %s 매도 호가 5단계 물량 부족", opp.sell_exchange)
+            return False
 
         if opp.buy_exchange == "binance":
             trade_krw = min(self.max_trade_krw, self._get_upbit_coin_value(coin))
@@ -248,6 +301,7 @@ class CrossArbEngine:
 
     def _record_trade(self, opp: ArbOpportunity, trade_usdt: float):
         profit_usdt = trade_usdt * (opp.net_profit_pct / 100)
+        profit_krw = profit_usdt * opp.fx_rate
         self._daily_pnl_usdt += profit_usdt
         self._daily_trades += 1
         self._last_trade_time[opp.coin] = time.time()
@@ -255,6 +309,14 @@ class CrossArbEngine:
             time.time(), opp.coin, opp.buy_exchange, opp.sell_exchange,
             opp.buy_price, opp.sell_price, trade_usdt, profit_usdt, opp.net_profit_pct,
         ))
+        self._kill_switch.record_trade(profit_krw)
+        self._trade_logger.log(
+            bot="cross_arb", side="ARB", symbol=opp.coin,
+            exchange="%s→%s" % (opp.buy_exchange, opp.sell_exchange),
+            price=opp.buy_price, amount=trade_usdt,
+            pnl_pct=opp.net_profit_pct, pnl_amount=profit_krw,
+            reason="스프레드:%.3f%%" % opp.spread_pct,
+        )
         self.telegram.notify_arbitrage(
             opp.coin, opp.buy_exchange, opp.sell_exchange,
             opp.spread_pct, opp.net_profit_pct)

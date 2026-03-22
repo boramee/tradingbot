@@ -20,6 +20,7 @@ from src.strategies.macd import MACDStrategy
 from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
 from src.utils.telegram_bot import TelegramNotifier
+from src.utils.safety import KillSwitch, TradeLogger, APIGuard
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,9 @@ class TraderEngine:
         self.trade_logs: List[TradeLog] = []
         self.running = False
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
+        self.kill_switch = KillSwitch(max_daily_loss_pct=3.0)
+        self.trade_logger = TradeLogger()
+        self.api_guard = APIGuard(calls_per_sec=4)
 
         self._daily_trades = 0
         self._max_daily_trades = 10
@@ -202,6 +206,10 @@ class TraderEngine:
                 atr_info = " (ATR:%.0f)" % current_atr if current_atr > 0 else ""
                 logger.info("[매수] %s | %.0f원 투자%s | %s", self.ticker, amount, atr_info, reason)
                 self.telegram.notify_buy(self.ticker, price, amount, reason)
+                self.trade_logger.log(
+                    bot="coin_trader", side="BUY", symbol=self.ticker, exchange="upbit",
+                    price=price, quantity=amount / price, amount=amount,
+                    fee=amount * self.fee_rate, reason=reason)
                 return True
             logger.error("[매수 실패] %s", result)
         else:
@@ -256,6 +264,17 @@ class TraderEngine:
             self.trade_logs.append(TradeLog(time.time(), "SELL", price, sell_volume * price, reason, pnl_pct))
             logger.info("[시뮬] %s 수익률 %+.2f%% | %s", tag, pnl_pct, reason)
             self.telegram.notify_sell(self.ticker, price, pnl_pct, "[시뮬]" + tag + " " + reason)
+
+        # CSV 기록 + Kill Switch
+        pnl_amount = sell_volume * price * (pnl_pct / 100)
+        self.trade_logger.log(
+            bot="coin_trader", side="SELL", symbol=self.ticker, exchange="upbit",
+            price=price, quantity=sell_volume, amount=sell_volume * price,
+            fee=sell_volume * price * self.fee_rate,
+            pnl_pct=pnl_pct, pnl_amount=pnl_amount, reason=reason,
+        )
+        if not partial:
+            self.kill_switch.record_trade(pnl_amount)
 
         if partial:
             self.position.volume = full_volume - sell_volume
@@ -347,12 +366,32 @@ class TraderEngine:
 
     # ── 메인 사이클 ──
 
+    def _get_current_indicators(self, df) -> Dict:
+        """현재 지표값 추출 (CSV 기록용)"""
+        if df is None or df.empty:
+            return {}
+        last = df.iloc[-1]
+        return {
+            "rsi": float(last.get("rsi", 0)) if pd.notna(last.get("rsi")) else 0,
+            "macd_hist": float(last.get("macd_hist", 0)) if pd.notna(last.get("macd_hist")) else 0,
+            "adx": float(last.get("adx", 0)) if pd.notna(last.get("adx")) else 0,
+            "atr": float(last.get("atr", 0)) if pd.notna(last.get("atr")) else 0,
+            "vol_ratio": float(last.get("vol_ratio", 0)) if pd.notna(last.get("vol_ratio")) else 0,
+        }
+
     def run_once(self):
         """한 사이클 실행"""
+        # Kill Switch 체크
+        if self.kill_switch.is_killed():
+            return
+
+        self.api_guard.wait_if_needed()
+
         df = self._fetch_ohlcv()
         if df is None:
-            logger.warning("데이터 조회 실패")
+            self.api_guard.on_error(Exception("데이터 없음"))
             return
+        self.api_guard.on_success()
 
         df = self.indicators.add_all(df)
         current_price = self._get_current_price()
@@ -507,7 +546,10 @@ class TraderEngine:
         logger.info("  손절: ATR x%.1f (폴백: -%.1f%%, 수수료 포함)", self.atr_stop_multiplier, self.stop_loss_pct)
         logger.info("  익절: +%.1f%%에서 분할 → +%.1f%%부터 트레일링 %.1f%% (수수료 포함)",
                      self.take_profit_pct * 0.6, self.take_profit_pct, self.trailing_pct)
-        logger.info("  보호: 연속%d손실 시 %d분 쿨다운", self._max_consecutive_losses, self._cooldown_minutes)
+        logger.info("  보호: 연속%d손실→%d분쿨다운 | 일일-%.0f%%→당일매매중단",
+                     self._max_consecutive_losses, self._cooldown_minutes,
+                     self.kill_switch.max_daily_loss_pct)
+        logger.info("  기록: logs/trades.csv")
         mode = "실거래" if self._upbit else "시뮬레이션"
         logger.info("  주기: %d초 | API: %s", poll_sec, mode)
         logger.info("=" * 55)
