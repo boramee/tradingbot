@@ -32,7 +32,8 @@ from src.stock.us_engine import USStockEngine
 def main():
     parser = argparse.ArgumentParser(description="미국 주식 자동매매 봇")
     parser.add_argument("--symbols", default="AAPL,NVDA,TSLA", help="종목 (쉼표 구분)")
-    parser.add_argument("--strategy", default="macd", choices=["macd", "adaptive"])
+    parser.add_argument("--strategy", default="bollinger",
+                        choices=["rsi", "macd", "bollinger", "combined", "adaptive"])
     parser.add_argument("--interval", type=int, default=30, help="조회 주기 (초)")
     parser.add_argument("--invest-ratio", type=float, default=0.3)
     parser.add_argument("--max-invest", type=float, default=500, help="1회 최대 ($)")
