@@ -115,19 +115,22 @@ class TraderEngine:
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
 
         self._daily_trades = 0
-        self._max_daily_trades = 20
+        self._max_daily_trades = 10
         self._consecutive_losses = 0
         self._max_consecutive_losses = 3
-        self._cooldown_until: float = 0       # 쿨다운 종료 시각
-        self._cooldown_minutes = 10           # 연속 손실 후 대기 시간(분)
+        self._cooldown_until: float = 0
+        self._cooldown_minutes = 15           # 연속 손실 후 15분 대기
         self._htf_update_interval = 300
         self._htf_last_update: float = 0
         self._last_alert_reason: str = ""
         self._last_alert_time: float = 0
-        self._last_trade_time: float = 0      # 마지막 매매 시각
-        self._min_trade_interval = 60         # 매매 간 최소 간격(초)
-        self._last_stop_loss_time: float = 0  # 마지막 손절 시각
-        self._stop_loss_lockout = 180         # 손절 후 재진입 금지(초)
+        self._last_buy_time: float = 0       # 마지막 매수 시각
+        self._last_sell_time: float = 0      # 마지막 매도 시각
+        self._min_buy_interval = 300          # 매수 후 최소 5분 대기
+        self._min_rebuy_interval = 600        # 매도 후 재매수까지 10분 대기
+        self._last_stop_loss_time: float = 0
+        self._stop_loss_lockout = 900         # 손절 후 15분 재진입 금지
+        self._last_buy_price: float = 0       # 직전 매수가 기록
 
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
@@ -414,23 +417,33 @@ class TraderEngine:
         now = time.time()
 
         if sig.signal == Signal.BUY and not is_holding:
-            if now - self._last_trade_time < self._min_trade_interval:
-                remaining = int(self._min_trade_interval - (now - self._last_trade_time))
-                logger.debug("[대기] 매매 간격 제한 (%d초 남음)", remaining)
+            # 매수 후 최소 5분 대기
+            if now - self._last_buy_time < self._min_buy_interval:
                 return
 
-            if now - self._last_stop_loss_time < self._stop_loss_lockout:
-                remaining = int(self._stop_loss_lockout - (now - self._last_stop_loss_time))
-                logger.debug("[대기] 손절 후 재진입 금지 (%d초 남음)", remaining)
+            # 매도 후 재매수까지 10분 대기
+            if now - self._last_sell_time < self._min_rebuy_interval:
                 return
+
+            # 손절 후 15분 재진입 금지
+            if now - self._last_stop_loss_time < self._stop_loss_lockout:
+                return
+
+            # 직전 매수가 근처(±0.5%)에서 재매수 방지
+            if self._last_buy_price > 0:
+                price_diff = abs(current_price - self._last_buy_price) / self._last_buy_price * 100
+                if price_diff < 0.5:
+                    logger.debug("[대기] 직전 매수가 근처 (%.1f%% 차이)", price_diff)
+                    return
 
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
             if self._buy(sig.reason, current_atr=atr):
-                self._last_trade_time = now
+                self._last_buy_time = now
+                self._last_buy_price = current_price
 
         elif sig.signal == Signal.SELL and is_holding:
             if self._sell(sig.reason):
-                self._last_trade_time = now
+                self._last_sell_time = now
 
     def _update_higher_timeframe(self):
         """상위 타임프레임 추세를 주기적으로 갱신"""
