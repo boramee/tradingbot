@@ -8,7 +8,7 @@ LOG="$DIR/us_bot.log"
 PIDFILE="$DIR/.us_bot.pid"
 
 SYMBOLS="${SYMBOLS:-AAPL,NVDA,TSLA}"
-STRATEGY="${STRATEGY:-macd}"
+STRATEGY="${STRATEGY:-bollinger}"
 MAX_INVEST="${MAX_INVEST:-500}"
 
 start() {

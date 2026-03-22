@@ -8,11 +8,15 @@ MODE="${MODE:-swing}"
 STRATEGY="${STRATEGY:-macd}"
 INVEST_RATIO="${INVEST_RATIO:-0.3}"
 MAX_INVEST="${MAX_INVEST:-100000}"
+CANDLE="${CANDLE:-minute15}"
+STOP_LOSS="${STOP_LOSS:-1.5}"
+TAKE_PROFIT="${TAKE_PROFIT:-2.0}"
+TRAILING="${TRAILING:-0.8}"
 
 start() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null && echo "ETH 봇 실행 중 (PID: $(cat $PIDFILE))" && return
     source "$DIR/venv/bin/activate" 2>/dev/null
-    nohup $VENV run_trader.py --ticker $TICKER --mode $MODE --strategy $STRATEGY --invest-ratio $INVEST_RATIO --max-invest $MAX_INVEST > "$LOG" 2>&1 &
+    nohup $VENV run_trader.py --ticker $TICKER --strategy $STRATEGY --invest-ratio $INVEST_RATIO --max-invest $MAX_INVEST --candle $CANDLE --interval 30 --stop-loss $STOP_LOSS --take-profit $TAKE_PROFIT --trailing $TRAILING > "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     echo "ETH 봇 시작 (PID: $!)"
 }
