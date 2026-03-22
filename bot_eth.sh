@@ -4,10 +4,10 @@ VENV="$DIR/venv/bin/python3"
 LOG="$DIR/eth_bot.log"
 PIDFILE="$DIR/.eth_bot.pid"
 TICKER="KRW-ETH"
-MODE="${MODE:-scalp}"
-STRATEGY="${STRATEGY:-rsi}"
-INVEST_RATIO="${INVEST_RATIO:-0.8}"
-MAX_INVEST="${MAX_INVEST:-50000}"
+MODE="${MODE:-swing}"
+STRATEGY="${STRATEGY:-macd}"
+INVEST_RATIO="${INVEST_RATIO:-0.3}"
+MAX_INVEST="${MAX_INVEST:-100000}"
 
 start() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null && echo "ETH 봇 실행 중 (PID: $(cat $PIDFILE))" && return
