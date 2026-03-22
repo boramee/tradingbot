@@ -73,13 +73,22 @@ class CrossArbEngine:
     BINANCE_FEE = 0.001      # 0.1%
     TOTAL_FEE_PCT = (UPBIT_FEE + BINANCE_FEE) * 100  # 0.15%
 
+    # 전송 속도/수수료 기준 코인 순위 (리밸런싱용)
+    TRANSFER_PRIORITY = {
+        "XRP": {"speed": "3초", "fee_usdt": 0.1},
+        "TRX": {"speed": "3초", "fee_usdt": 0.1},
+        "SOL": {"speed": "5초", "fee_usdt": 0.01},
+        "ETH": {"speed": "5분", "fee_usdt": 2.0},
+        "BTC": {"speed": "30분", "fee_usdt": 5.0},
+    }
+
     def __init__(
         self,
         upbit_access: str = "",
         upbit_secret: str = "",
         binance_access: str = "",
         binance_secret: str = "",
-        coins: str = "BTC,ETH,XRP",
+        coins: str = "BTC,ETH,XRP,SOL,TRX",
         min_profit_pct: float = 0.3,
         max_trade_krw: int = 100_000,
         slippage_pct: float = 0.1,
@@ -120,6 +129,7 @@ class CrossArbEngine:
         self._rebalance_alerted: Dict[str, bool] = {}
         self._daily_report = DailyReport()
         self._last_report_date: str = ""
+        self._pending_transfers: Dict[str, Dict] = {}  # 입출금 대기 추적
 
     # ── 가격 조회 ──
 
@@ -382,7 +392,7 @@ class CrossArbEngine:
             return 0
 
     def _check_rebalance(self):
-        """잔고 불균형 감지 → 텔레그램 알림"""
+        """잔고 불균형 감지 → 전송 추천 코인 포함 텔레그램 알림"""
         if not self._upbit:
             return
         try:
@@ -393,22 +403,31 @@ class CrossArbEngine:
 
             krw_ratio = krw / (krw + usdt * fx) * 100 if (krw + usdt * fx) > 0 else 50
 
+            # 전송 추천 코인 (수수료 저렴한 순)
+            recommend = "추천 전송 코인: XRP(0.1$,3초) > TRX(0.1$,3초) > SOL(0.01$,5초)"
+
             if krw_ratio < 20 and not self._rebalance_alerted.get("krw_low"):
+                if self._pending_transfers:
+                    pending = ", ".join(self._pending_transfers.keys())
+                    logger.info("[리밸런싱] 전송 대기 중: %s → 알림 스킵", pending)
+                    return
                 self.telegram.send(
                     "<b>⚠️ 리밸런싱 필요</b>\n"
                     "업비트 KRW 부족 (%.0f%%)\n"
                     "업비트: %s원\n바이낸스: %s USDT\n"
-                    "→ 바이낸스에서 업비트로 코인 전송 고려"
-                    % (krw_ratio, "{:,}".format(int(krw)), "{:,.0f}".format(usdt)))
+                    "→ 바이낸스→업비트 코인 전송 필요\n%s"
+                    % (krw_ratio, "{:,}".format(int(krw)), "{:,.0f}".format(usdt), recommend))
                 self._rebalance_alerted["krw_low"] = True
 
             elif krw_ratio > 80 and not self._rebalance_alerted.get("usdt_low"):
+                if self._pending_transfers:
+                    return
                 self.telegram.send(
                     "<b>⚠️ 리밸런싱 필요</b>\n"
                     "바이낸스 USDT 부족 (KRW %.0f%%)\n"
                     "업비트: %s원\n바이낸스: %s USDT\n"
-                    "→ 업비트에서 바이낸스로 코인 전송 고려"
-                    % (krw_ratio, "{:,}".format(int(krw)), "{:,.0f}".format(usdt)))
+                    "→ 업비트→바이낸스 코인 전송 필요\n%s"
+                    % (krw_ratio, "{:,}".format(int(krw)), "{:,.0f}".format(usdt), recommend))
                 self._rebalance_alerted["usdt_low"] = True
 
             elif 30 <= krw_ratio <= 70:
@@ -417,16 +436,50 @@ class CrossArbEngine:
         except Exception as e:
             logger.debug("리밸런싱 체크 실패: %s", e)
 
+    # ── 입출금 대기 추적 ──
+
+    def _check_pending_transfers(self):
+        """입출금 대기 중인 자산이 있으면 리밸런싱 알림 억제"""
+        if not self._upbit or not self._pending_transfers:
+            return
+
+        completed = []
+        for coin, info in self._pending_transfers.items():
+            elapsed = time.time() - info.get("time", 0)
+            if elapsed > 3600:  # 1시간 초과 → 완료 또는 실패로 간주
+                completed.append(coin)
+                self.telegram.send(
+                    "<b>📦 전송 추적 해제</b>\n%s 전송 후 1시간 경과 → 수동 확인 필요" % coin)
+
+        for coin in completed:
+            del self._pending_transfers[coin]
+
+    def _record_pending_transfer(self, coin: str, direction: str, amount: float):
+        """리밸런싱 전송 기록 (중복 전송 방지)"""
+        if coin in self._pending_transfers:
+            logger.info("[전송 중복 방지] %s 이미 전송 대기 중", coin)
+            return False
+        self._pending_transfers[coin] = {
+            "direction": direction, "amount": amount, "time": time.time(),
+        }
+        return True
+
     # ── 메인 사이클 ──
 
     def run_once(self):
         now = time.time()
 
+        if self._kill_switch.is_killed():
+            return
         if self._daily_trades >= self._max_daily_trades:
             return
 
+        self._check_pending_transfers()
+
+        # 모든 코인의 스프레드를 수집하고, 가장 큰 것부터 실행
+        opportunities: List[ArbOpportunity] = []
+
         for coin in self.coins:
-            # 코인별 쿨다운
             last = self._last_trade_time.get(coin, 0)
             if now - last < self._trade_cooldown:
                 continue
@@ -436,13 +489,23 @@ class CrossArbEngine:
                 continue
 
             opp = self._find_opportunity(prices)
-            if not opp:
+            if opp:
+                opportunities.append(opp)
+            else:
                 kimchi = (prices["upbit_bid_usdt"] - prices["binance_ask"]) / prices["binance_ask"] * 100
                 logger.debug("[%s] 김프: %+.2f%% | 순수익 부족", coin, kimchi)
-                continue
 
-            logger.info("[기회] %s", opp.summary())
-            self._execute(opp)
+        if not opportunities:
+            return
+
+        # 순수익이 가장 큰 코인 선택
+        opportunities.sort(key=lambda o: o.net_profit_pct, reverse=True)
+        best = opportunities[0]
+        logger.info("[최적코인] %s (순수익: %+.3f%%) — 후보: %s",
+                     best.coin,
+                     best.net_profit_pct,
+                     ", ".join("%s(%+.2f%%)" % (o.coin, o.net_profit_pct) for o in opportunities))
+        self._execute(best)
 
     def start(self):
         self.running = True

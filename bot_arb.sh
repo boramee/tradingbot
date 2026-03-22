@@ -7,7 +7,7 @@ VENV="$DIR/venv/bin/python3"
 LOG="$DIR/arb_bot.log"
 PIDFILE="$DIR/.arb_bot.pid"
 
-COINS="${COINS:-BTC,ETH,XRP}"
+COINS="${COINS:-BTC,ETH,XRP,SOL,TRX}"
 MIN_PROFIT="${MIN_PROFIT:-0.3}"
 MAX_TRADE="${MAX_TRADE:-100000}"
 
