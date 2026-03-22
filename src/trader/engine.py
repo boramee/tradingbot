@@ -122,6 +122,7 @@ class TraderEngine:
         self.api_guard = APIGuard(calls_per_sec=4)
         self.daily_report = DailyReport()
         self._last_report_date: str = ""
+        self._last_indicators: Dict = {}    # 최근 지표값 (CSV용)
 
         self._daily_trades = 0
         self._max_daily_trades = 10
@@ -214,7 +215,8 @@ class TraderEngine:
                 self.trade_logger.log(
                     bot="coin_trader", side="BUY", symbol=self.ticker, exchange="upbit",
                     price=price, quantity=amount / price, amount=amount,
-                    fee=amount * self.fee_rate, reason=reason)
+                    fee=amount * self.fee_rate, reason=reason,
+                    indicators=self._last_indicators)
                 return True
             logger.error("[매수 실패] %s", result)
         else:
@@ -276,6 +278,7 @@ class TraderEngine:
             bot="coin_trader", side="SELL", symbol=self.ticker, exchange="upbit",
             price=price, quantity=sell_volume, amount=sell_volume * price,
             fee=sell_volume * price * self.fee_rate,
+            indicators=self._last_indicators,
             pnl_pct=pnl_pct, pnl_amount=pnl_amount, reason=reason,
         )
         if not partial:
@@ -399,6 +402,7 @@ class TraderEngine:
         self.api_guard.on_success()
 
         df = self.indicators.add_all(df)
+        self._last_indicators = self._get_current_indicators(df)
         current_price = self._get_current_price()
 
         # 상위 타임프레임 갱신 (5분마다)
@@ -481,6 +485,9 @@ class TraderEngine:
                     return
 
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
+            min_atr = current_price * 0.005  # ATR 최소: 가격의 0.5%
+            if atr < min_atr:
+                atr = min_atr
             if self._buy(sig.reason, current_atr=atr):
                 self._last_buy_time = now
                 self._last_buy_price = current_price
