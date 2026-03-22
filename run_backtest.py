@@ -48,6 +48,38 @@ def fetch_stock_data(code: str, days: int = 365):
     return None
 
 
+def fetch_us_data(symbol: str, days: int = 365):
+    """야후 파이낸스에서 미국 주식 과거 데이터 조회"""
+    try:
+        import yfinance as yf
+        import pandas as pd
+        from datetime import datetime, timedelta
+
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
+
+        if df is None or df.empty:
+            print("데이터 없음: %s" % symbol)
+            return None
+
+        df = df.rename(columns={
+            "Open": "open", "High": "high", "Low": "low",
+            "Close": "close", "Volume": "volume",
+        })
+        df = df[["open", "high", "low", "close", "volume"]]
+        name = ticker.info.get("shortName", symbol)
+        print("데이터: %s %s (%d일)" % (symbol, name, len(df)))
+        return df
+    except ImportError:
+        print("yfinance 패키지 필요: pip install yfinance")
+        return None
+    except Exception as e:
+        print("미국 주식 데이터 조회 실패: %s" % e)
+        return None
+
+
 def fetch_coin_data(ticker: str, days: int = 365):
     """업비트에서 코인 과거 데이터 조회"""
     import pyupbit
@@ -83,7 +115,7 @@ def fetch_coin_data(ticker: str, days: int = 365):
 def main():
     parser = argparse.ArgumentParser(description="백테스트 - 과거 데이터로 전략 검증")
     parser.add_argument("--symbol", default="005930", help="종목코드 또는 코인티커")
-    parser.add_argument("--type", choices=["stock", "coin"], default="stock")
+    parser.add_argument("--type", choices=["stock", "coin", "us"], default="stock")
     parser.add_argument("--strategy", default="all",
                         choices=["rsi", "macd", "bollinger", "combined", "adaptive", "all"])
     parser.add_argument("--days", type=int, default=365, help="백테스트 기간 (일)")
@@ -95,18 +127,23 @@ def main():
 
     args = parser.parse_args()
 
-    # 코인 자동 감지
+    # 자동 감지
     if args.symbol.startswith("KRW-"):
         args.type = "coin"
+    elif args.symbol.isupper() and len(args.symbol) <= 5 and not args.symbol.isdigit():
+        args.type = "us"
 
     # 수수료 기본값
     if args.fee is None:
-        args.fee = 0.0005 if args.type == "coin" else 0.00015
+        fees = {"coin": 0.0005, "stock": 0.00015, "us": 0.0025}
+        args.fee = fees.get(args.type, 0.001)
 
     # 데이터 조회
     print("\n%s 데이터 조회 중... (%d일)" % (args.symbol, args.days))
     if args.type == "coin":
         df = fetch_coin_data(args.symbol, args.days)
+    elif args.type == "us":
+        df = fetch_us_data(args.symbol, args.days)
     else:
         df = fetch_stock_data(args.symbol, args.days)
 
