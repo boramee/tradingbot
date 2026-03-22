@@ -24,6 +24,7 @@ import ccxt
 
 from src.monitor.fx_rate import FXRateProvider
 from src.utils.telegram_bot import TelegramNotifier
+from src.utils.daily_report import DailyReport
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,8 @@ class CrossArbEngine:
         self._last_trade_time: Dict[str, float] = {}
         self._trade_cooldown = 120  # 같은 코인 2분 쿨다운
         self._rebalance_alerted: Dict[str, bool] = {}
+        self._daily_report = DailyReport()
+        self._last_report_date: str = ""
 
     # ── 가격 조회 ──
 
@@ -468,11 +471,12 @@ class CrossArbEngine:
             try:
                 self.run_once()
 
-                # 5분마다 리밸런싱 체크
                 rebalance_check += self.poll_interval
                 if rebalance_check >= 300:
                     self._check_rebalance()
                     rebalance_check = 0
+
+                self._send_daily_report_if_needed()
 
             except Exception as e:
                 logger.error("사이클 오류: %s", e, exc_info=True)
@@ -485,3 +489,17 @@ class CrossArbEngine:
 
         logger.info("봇 종료 (일일 PnL: %+.4f USDT, 거래: %d건)",
                      self._daily_pnl_usdt, self._daily_trades)
+
+    def _send_daily_report_if_needed(self):
+        import datetime as dt
+        today = dt.date.today().isoformat()
+        if self._last_report_date == today:
+            return
+        if not self._last_report_date:
+            self._last_report_date = today
+            return
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        report = self._daily_report.generate(yesterday)
+        self.telegram.send(report)
+        logger.info("[일일리포트] %s 전송 완료", yesterday)
+        self._last_report_date = today
