@@ -6,7 +6,7 @@
   python3 run_stock.py                              # 삼성전자, combined
   python3 run_stock.py --code 035720                # 카카오
   python3 run_stock.py --code 005930 --strategy rsi # 삼성전자 RSI
-  python3 run_stock.py --real                       # 실전 모드 (기본: 모의투자)
+  python3 run_stock.py --virtual                    # 모의투자 모드 (기본: 실전)
 
 종목코드 예시:
   005930 삼성전자  |  000660 SK하이닉스  |  035720 카카오

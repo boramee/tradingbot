@@ -63,6 +63,13 @@ class TestATRStopLoss:
         assert engine._check_stop_loss(96000) is True
         assert engine._check_stop_loss(98000) is False
 
+    def test_atr_stop_includes_fee_buffer(self, engine):
+        """ATR 손절도 수수료만큼 더 이르게 발동한다."""
+        engine.position.avg_price = 100000
+        engine.position.entry_atr = 2000
+        assert engine._check_stop_loss(96050) is True
+        assert engine._check_stop_loss(96150) is False
+
 
 class TestTrailingStop:
     def test_not_active_below_threshold(self, engine):
@@ -90,6 +97,13 @@ class TestTrailingStop:
         detail = engine._get_trailing_detail(107000)
         assert "트레일링" in detail
         assert "최고점" in detail
+
+
+class TestPnlCalculation:
+    def test_calc_pnl_includes_round_trip_fee(self, engine):
+        engine.position.avg_price = 100000
+        assert engine._calc_pnl(100100) == pytest.approx(0.0)
+        assert engine._calc_pnl(99600) == pytest.approx(-0.5)
 
 
 class TestRunOnce:
