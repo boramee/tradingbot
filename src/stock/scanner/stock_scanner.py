@@ -252,7 +252,16 @@ class StockScanner:
         logger.debug("[스캐너 2단계] 돌파 후보: %d종목", len(filtered))
         return filtered
 
-    # ── 3단계: 섹터 쏠림 + 대장주 판별 ──
+    # ── 3단계: 섹터 쏠림 + 대장주 + 섹터 평균 등락률 ──
+
+    def _calc_sector_avg_change(self, sector_codes: List[str]) -> float:
+        """섹터 내 종목들의 평균 등락률 계산"""
+        changes = []
+        for code in sector_codes[:5]:
+            info = self.kis.get_current_price(code)
+            if info and info.get("change_pct") is not None:
+                changes.append(info["change_pct"])
+        return sum(changes) / len(changes) if changes else 0.0
 
     def _stage3_sector_scoring(self, candidates: List[ScanResult]) -> List[ScanResult]:
         code_set = {c.code for c in candidates}
@@ -275,10 +284,13 @@ class StockScanner:
                 if len(overlap) >= 2 and overlap_cands:
                     sector_hits[sector_name] = overlap_cands
 
-        # 섹터 가산 + 대장주 판별
+        # 섹터 가산 + 대장주 + 섹터 평균 등락률
         for sector_name, members in sector_hits.items():
             members.sort(key=lambda m: m.change_pct, reverse=True)
-            leader = members[0]
+
+            # 섹터 평균 등락률 계산
+            sector_codes = SECTOR_MAP.get(sector_name, [])
+            sector_avg = self._calc_sector_avg_change(sector_codes)
 
             for i, cand in enumerate(members):
                 cand.sector = sector_name
@@ -286,8 +298,14 @@ class StockScanner:
                 cand.score += hits * 10
                 cand.reasons.append("섹터쏠림(%s:%d종목)" % (sector_name, hits))
 
+                # 섹터 평균 +3% 이상이면 추가 보너스
+                if sector_avg >= 3.0:
+                    cand.score += 15
+                    cand.reasons.append("섹터강세(평균%+.1f%%)" % sector_avg)
+                elif sector_avg >= 1.5:
+                    cand.score += 5
+
                 if i == 0:
-                    # 대장주 (상승률 1위)
                     cand.score += 20
                     cand.is_sector_leader = True
                     cand.reasons.append("★대장주(+%.1f%%)" % cand.change_pct)
