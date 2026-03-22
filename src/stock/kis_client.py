@@ -380,9 +380,9 @@ class KISClient:
             result = {"foreign_net": 0, "institution_net": 0, "program_net": 0}
             for item in items:
                 investor = item.get("invst_nm", "")
-                buy = int(item.get("seln_qty", 0))
-                sell = int(item.get("shnu_qty", 0))
-                net = sell - buy
+                sell_qty = int(item.get("seln_qty", 0))
+                buy_qty = int(item.get("shnu_qty", 0))
+                net = buy_qty - sell_qty
 
                 if "외국인" in investor:
                     result["foreign_net"] = net

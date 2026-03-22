@@ -251,6 +251,8 @@ class StockEngine:
 
         result = self.kis.buy(self.stock_code, qty)
         if result and result.get("success"):
+            self.position.code = self.stock_code
+            self.position.name = self._stock_name
             self.position.avg_price = price
             self.position.quantity = qty
             self.position.highest_price = price
@@ -320,7 +322,7 @@ class StockEngine:
                             "<b>⏸ 쿨다운</b>\n%d연속 손실 → 10분 대기" % self._consecutive_losses)
                 else:
                     self._consecutive_losses = 0
-                self.position = StockPosition(code=self.stock_code)
+                self.position = StockPosition(code=self.stock_code, name=self._stock_name)
             return True
         return False
 
@@ -344,11 +346,65 @@ class StockEngine:
         drop = (self.position.highest_price - price) / self.position.highest_price * 100
         return drop >= self.trailing_pct
 
+    def _sync_position_from_balance(self):
+        """잔고 기반으로 현재 포지션을 동기화한다."""
+        balance = self.kis.get_balance()
+        if not balance:
+            return
+
+        holding = None
+        for item in balance["holdings"]:
+            if item["code"] == self.stock_code:
+                holding = item
+                break
+
+        if not holding:
+            self.position = StockPosition(code=self.stock_code, name=self._stock_name)
+            return
+
+        self._stock_name = holding.get("name", self._stock_name) or self._stock_name
+        prev_avg_price = self.position.avg_price
+        self.position.code = self.stock_code
+        self.position.name = self._stock_name
+        self.position.quantity = holding["quantity"]
+        self.position.avg_price = holding["avg_price"]
+
+        if prev_avg_price != holding["avg_price"]:
+            self.position.entry_atr = 0
+            self.position.partial_sold = False
+
+        # 재시작/외부 체결 직후에는 최고가가 0이라 트레일링이 비활성화되므로
+        # 잔고에서 현재가를 받아 최소 초기값을 채운다.
+        if self.position.highest_price <= 0 or prev_avg_price != holding["avg_price"]:
+            self.position.highest_price = max(holding.get("current_price", 0), holding["avg_price"])
+
     # ── 메인 사이클 ──
 
     def run_once(self):
         mode = self.get_trading_mode()
         if mode == "closed":
+            return
+
+        if self.kis.is_authenticated:
+            self._sync_position_from_balance()
+
+        is_holding = self.position.quantity > 0 and self.position.avg_price > 0
+
+        # ── 시간대별 매수 필터 ──
+        if mode == "opening_wait" and not is_holding:
+            logger.debug("[%s] 시초가 안정 대기 (9:00~9:05)", self.stock_code)
+            return
+
+        if mode == "closing" and not is_holding:
+            logger.debug("[%s] 장마감 모드 - 신규매수 금지", self.stock_code)
+            return
+
+        # 자동 스캔 모드는 현재 고정 종목의 신호와 무관하게 스캐너를 먼저 실행한다.
+        if self.auto_scan and not is_holding:
+            now = time.time()
+            if now < self._cooldown_until:
+                return
+            self._run_auto_scan(now)
             return
 
         df = self._fetch_data()
@@ -359,18 +415,6 @@ class StockEngine:
         price = self._get_price()
         if price <= 0:
             return
-
-        # 잔고 동기화
-        if self.kis.is_authenticated:
-            balance = self.kis.get_balance()
-            if balance:
-                for h in balance["holdings"]:
-                    if h["code"] == self.stock_code:
-                        self.position.quantity = h["quantity"]
-                        self.position.avg_price = h["avg_price"]
-                        break
-
-        is_holding = self.position.quantity > 0 and self.position.avg_price > 0
 
         # ── 보유 중: 손절/익절 (시간대 무관, 항상 실행) ──
         if is_holding:
@@ -402,15 +446,6 @@ class StockEngine:
                 self._sell("장마감 전 청산 (+%.1f%%)" % gain_pct)
                 return
 
-        # ── 시간대별 매수 필터 ──
-        if mode == "opening_wait":
-            logger.debug("[%s] 시초가 안정 대기 (9:00~9:05)", self.stock_code)
-            return
-
-        if mode == "closing":
-            logger.debug("[%s] 장마감 모드 - 신규매수 금지", self.stock_code)
-            return
-
         # ── 쿨다운 체크 ──
         now = time.time()
         if now < self._cooldown_until:
@@ -423,11 +458,6 @@ class StockEngine:
                      sig.signal.value, sig.confidence * 100, mode, sig.reason)
 
         if not sig.is_actionable:
-            return
-
-        # ── 자동 스캔 모드: 스캐너가 종목 선택 ──
-        if self.auto_scan and not is_holding:
-            self._run_auto_scan(now)
             return
 
         # ── 고정 종목 모드: 기존 로직 ──
@@ -488,6 +518,7 @@ class StockEngine:
 
         # 종목 전환
         old_code = self.stock_code
+        old_name = self._stock_name
         self.stock_code = best.code
         self._stock_name = best.name
 
@@ -509,6 +540,7 @@ class StockEngine:
                 )
         else:
             self.stock_code = old_code
+            self._stock_name = old_name
 
     def start(self, poll_sec: int = 10):
         self.running = True
