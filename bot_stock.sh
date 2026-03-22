@@ -10,7 +10,7 @@ PIDFILE="$DIR/.stock_bot.pid"
 
 # 기본 설정
 CODE="${CODE:-005930}"           # 종목코드 (삼성전자)
-STRATEGY="${STRATEGY:-rsi}"
+STRATEGY="${STRATEGY:-macd}"
 INVEST_RATIO="${INVEST_RATIO:-0.1}"
 MAX_INVEST="${MAX_INVEST:-500000}"
 SCAN="${SCAN:-1}"                 # 기본: 자동스캔. 끄려면 SCAN=0
