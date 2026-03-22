@@ -25,6 +25,7 @@ from src.strategies.rsi import RSIStrategy
 from src.strategies.macd import MACDStrategy
 from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
+from src.strategies.adaptive import AdaptiveStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from .kis_client import KISClient
 from .scanner import StockScanner
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 STRATEGY_MAP: Dict[str, type] = {
     "rsi": RSIStrategy, "macd": MACDStrategy,
     "bollinger": BollingerStrategy, "combined": CombinedStrategy,
+    "adaptive": AdaptiveStrategy,
 }
 
 MARKET_OPEN = datetime.time(9, 0)

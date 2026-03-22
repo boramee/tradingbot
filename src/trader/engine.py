@@ -19,6 +19,7 @@ from src.strategies.rsi import RSIStrategy
 from src.strategies.macd import MACDStrategy
 from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
+from src.strategies.adaptive import AdaptiveStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger, APIGuard
 
@@ -29,6 +30,7 @@ STRATEGY_MAP: Dict[str, type] = {
     "macd": MACDStrategy,
     "bollinger": BollingerStrategy,
     "combined": CombinedStrategy,
+    "adaptive": AdaptiveStrategy,
 }
 
 
