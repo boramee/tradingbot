@@ -97,8 +97,10 @@ class TraderEngine:
         self.take_profit_pct = take_profit_pct
         self.trailing_pct = trailing_pct
         self.atr_stop_multiplier = atr_stop_multiplier
-        self.partial_exit_pct = 50.0          # 1차 분할매도 비율 (%)
-        self.partial_trigger_pct = None       # take_profit_pct의 60%에서 1차 매도
+        self.partial_exit_pct = 50.0
+        self.partial_trigger_pct = None
+        self.fee_rate = 0.0005                # 업비트 수수료 0.05%
+        self.round_trip_fee_pct = self.fee_rate * 2 * 100  # 왕복 0.1%
         self.candle_count = candle_count
 
         self._upbit: Optional[pyupbit.Upbit] = None
@@ -212,6 +214,13 @@ class TraderEngine:
             return True
         return False
 
+    def _calc_pnl(self, sell_price: float) -> float:
+        """수수료 포함 실수익률 계산"""
+        if self.position.avg_price <= 0:
+            return 0.0
+        gross = (sell_price - self.position.avg_price) / self.position.avg_price * 100
+        return gross - self.round_trip_fee_pct
+
     def _sell(self, reason: str, partial: bool = False) -> bool:
         """전량 매도 또는 분할 매도"""
         full_volume = self._get_coin_balance() if self._upbit else self.position.volume
@@ -224,7 +233,7 @@ class TraderEngine:
             sell_volume = full_volume
 
         price = self._get_current_price()
-        pnl_pct = (price - self.position.avg_price) / self.position.avg_price * 100 if self.position.avg_price > 0 else 0
+        pnl_pct = self._calc_pnl(price)
 
         tag = "[분할매도]" if partial else "[매도]"
 
@@ -291,7 +300,7 @@ class TraderEngine:
     # ── 손절/익절 ──
 
     def _check_stop_loss(self, current_price: float) -> bool:
-        """ATR 기반 동적 손절. ATR 없으면 고정 %로 폴백."""
+        """ATR 기반 동적 손절 (수수료 포함). ATR 없으면 고정 %로 폴백."""
         if self.position.avg_price <= 0:
             return False
 
@@ -300,17 +309,16 @@ class TraderEngine:
             stop_price = self.position.avg_price - stop_distance
             return current_price <= stop_price
 
-        loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
-        return loss >= self.stop_loss_pct
+        net_pnl = self._calc_pnl(current_price)
+        return net_pnl <= -self.stop_loss_pct
 
     def _check_trailing_stop(self, current_price: float) -> bool:
-        """트레일링 스톱: 최고점 대비 N% 하락 시 익절.
-        먼저 take_profit_pct 이상 수익이 나야 활성화됨."""
+        """트레일링 스톱 (수수료 포함): 최고점 대비 N% 하락 시 익절."""
         if self.position.avg_price <= 0 or self.position.highest_price <= 0:
             return False
 
-        gain_from_entry = (current_price - self.position.avg_price) / self.position.avg_price * 100
-        if gain_from_entry < self.take_profit_pct:
+        net_pnl = self._calc_pnl(current_price)
+        if net_pnl < self.take_profit_pct:
             return False
 
         drop_from_high = (self.position.highest_price - current_price) / self.position.highest_price * 100
@@ -359,19 +367,19 @@ class TraderEngine:
         # 최고가 갱신 + 손절/분할매도/트레일링 체크
         if is_holding:
             self.position.update_highest(current_price)
-            gain_pct = (current_price - self.position.avg_price) / self.position.avg_price * 100
+            gain_pct = self._calc_pnl(current_price)
 
             # 손절 (최우선)
             if self._check_stop_loss(current_price):
                 detail = self._get_stop_loss_detail(current_price)
-                loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
-                self.telegram.notify_stop_loss(self.ticker, current_price, loss)
+                net_loss = self._calc_pnl(current_price)
+                self.telegram.notify_stop_loss(self.ticker, current_price, abs(net_loss))
                 self._sell(detail)
                 self._last_stop_loss_time = time.time()
                 self._last_trade_time = time.time()
                 return
 
-            # 분할매도: 익절 기준의 60% 도달 시 50% 매도
+            # 분할매도: 수수료 차감 후 익절 기준의 60% 도달 시
             partial_trigger = self.take_profit_pct * 0.6
             if not self.position.partial_sold and gain_pct >= partial_trigger:
                 self._sell(
@@ -482,8 +490,9 @@ class TraderEngine:
         logger.info("  대상: %s | 전략: %s", self.ticker, self.strategy.name)
         logger.info("  투자비율: %.0f%% | 최대: %s원",
                      self.invest_ratio * 100, "{:,.0f}".format(self.max_invest_krw))
-        logger.info("  손절: ATR x%.1f (폴백: %.1f%%)", self.atr_stop_multiplier, self.stop_loss_pct)
-        logger.info("  익절: +%.1f%%에서 50%%분할매도 → +%.1f%%부터 트레일링 %.1f%%",
+        logger.info("  수수료: 편도 %.2f%% / 왕복 %.2f%%", self.fee_rate * 100, self.round_trip_fee_pct)
+        logger.info("  손절: ATR x%.1f (폴백: -%.1f%%, 수수료 포함)", self.atr_stop_multiplier, self.stop_loss_pct)
+        logger.info("  익절: +%.1f%%에서 분할 → +%.1f%%부터 트레일링 %.1f%% (수수료 포함)",
                      self.take_profit_pct * 0.6, self.take_profit_pct, self.trailing_pct)
         logger.info("  보호: 연속%d손실 시 %d분 쿨다운", self._max_consecutive_losses, self._cooldown_minutes)
         mode = "실거래" if self._upbit else "시뮬레이션"
