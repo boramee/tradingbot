@@ -221,6 +221,14 @@ class TraderEngine:
         gross = (sell_price - self.position.avg_price) / self.position.avg_price * 100
         return gross - self.round_trip_fee_pct
 
+    def _get_atr_stop_price(self) -> float:
+        """ATR 손절가에 왕복 수수료만큼의 완충을 더한다."""
+        if self.position.avg_price <= 0 or self.position.entry_atr <= 0:
+            return 0.0
+        stop_distance = self.position.entry_atr * self.atr_stop_multiplier
+        fee_buffer = self.position.avg_price * (self.round_trip_fee_pct / 100)
+        return max(0.0, self.position.avg_price - stop_distance + fee_buffer)
+
     def _sell(self, reason: str, partial: bool = False) -> bool:
         """전량 매도 또는 분할 매도"""
         full_volume = self._get_coin_balance() if self._upbit else self.position.volume
@@ -305,9 +313,7 @@ class TraderEngine:
             return False
 
         if self.position.entry_atr > 0:
-            stop_distance = self.position.entry_atr * self.atr_stop_multiplier
-            stop_price = self.position.avg_price - stop_distance
-            return current_price <= stop_price
+            return current_price <= self._get_atr_stop_price()
 
         net_pnl = self._calc_pnl(current_price)
         return net_pnl <= -self.stop_loss_pct
@@ -327,19 +333,18 @@ class TraderEngine:
     def _get_stop_loss_detail(self, current_price: float) -> str:
         """손절 상세 사유"""
         if self.position.entry_atr > 0:
-            stop_dist = self.position.entry_atr * self.atr_stop_multiplier
-            stop_price = self.position.avg_price - stop_dist
-            loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
-            return "ATR 동적손절 (ATR:%.0f x%.1f = 손절가:%.0f, 손실:%.1f%%)" % (
+            stop_price = self._get_atr_stop_price()
+            loss = abs(self._calc_pnl(current_price))
+            return "ATR 동적손절 (ATR:%.0f x%.1f = 손절가:%.0f, 순손실:%.1f%%)" % (
                 self.position.entry_atr, self.atr_stop_multiplier, stop_price, loss)
-        loss = (self.position.avg_price - current_price) / self.position.avg_price * 100
-        return "고정손절 (%.1f%%)" % loss
+        loss = abs(self._calc_pnl(current_price))
+        return "고정손절 (순손실:%.1f%%)" % loss
 
     def _get_trailing_detail(self, current_price: float) -> str:
         """트레일링 스톱 상세 사유"""
-        gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
+        gain = self._calc_pnl(current_price)
         drop = (self.position.highest_price - current_price) / self.position.highest_price * 100
-        return "트레일링 익절 (수익:+%.1f%%, 최고점:%s, 하락:%.1f%%)" % (
+        return "트레일링 익절 (순수익:+%.1f%%, 최고점:%s, 하락:%.1f%%)" % (
             gain, "{:,.0f}".format(self.position.highest_price), drop)
 
     # ── 메인 사이클 ──
@@ -453,11 +458,11 @@ class TraderEngine:
     def _log_status(self, price: float, sig: TradeSignal, holding: bool, df=None):
         extra = ""
         if holding and self.position.avg_price > 0:
-            pnl = (price - self.position.avg_price) / self.position.avg_price * 100
+            pnl = self._calc_pnl(price)
             trail = ""
             if self.position.highest_price > 0:
                 trail = " | 최고: %s" % "{:,.0f}".format(self.position.highest_price)
-            extra = " | 평단: %s | 수익: %+.2f%%%s" % (
+            extra = " | 평단: %s | 순수익: %+.2f%%%s" % (
                 "{:,.0f}".format(self.position.avg_price), pnl, trail)
 
         adx_str = ""
