@@ -122,7 +122,8 @@ class TraderEngine:
         self.api_guard = APIGuard(calls_per_sec=4)
         self.daily_report = DailyReport()
         self._last_report_date: str = ""
-        self._last_indicators: Dict = {}    # 최근 지표값 (CSV용)
+        self._last_indicators: Dict = {}
+        self._last_heartbeat: float = 0
 
         self._daily_trades = 0
         self._max_daily_trades = 10
@@ -570,6 +571,7 @@ class TraderEngine:
         while self.running:
             try:
                 self.run_once()
+                self._heartbeat()
                 self._send_daily_report_if_needed()
             except Exception as e:
                 logger.error("사이클 오류: %s", e, exc_info=True)
@@ -581,6 +583,24 @@ class TraderEngine:
                     time.sleep(1)
 
         logger.info("봇 종료 완료")
+
+    def _heartbeat(self):
+        """매 시간 상태 로그"""
+        now = time.time()
+        if now - self._last_heartbeat < 3600:
+            return
+        self._last_heartbeat = now
+
+        hold_str = "보유 없음"
+        if self.position.is_holding and self.position.avg_price > 0:
+            price = self._get_current_price()
+            pnl = self._calc_pnl(price) if price > 0 else 0
+            hold_str = "보유: %s 평단:%s 수익:%+.1f%%" % (
+                self.ticker, "{:,.0f}".format(self.position.avg_price), pnl)
+
+        status = "[정기보고] %s | %s | 거래:%d건 | PnL:%+.0f원" % (
+            self.ticker, hold_str, self._daily_trades, self.kill_switch.daily_pnl)
+        logger.info(status)
 
     def _send_daily_report_if_needed(self):
         """날짜가 바뀌면 전일 리포트를 텔레그램으로 전송"""

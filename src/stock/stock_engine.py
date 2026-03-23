@@ -151,6 +151,7 @@ class StockEngine:
         self._today_open_price: Dict[str, float] = {}
         self._last_block_reason: str = ""
         self._last_block_time: float = 0
+        self._last_heartbeat: float = 0
 
     # ── 시간대 ──
 
@@ -603,6 +604,7 @@ class StockEngine:
             try:
                 if self.is_market_open():
                     self.run_once()
+                    self._heartbeat()
                 else:
                     now = datetime.datetime.now()
                     if now.hour == 15 and now.minute == 21:
@@ -622,6 +624,33 @@ class StockEngine:
                     time.sleep(1)
 
         logger.info("봇 종료")
+
+    def _heartbeat(self):
+        """매 시간 정각에 상태 로그 + 텔레그램"""
+        now = time.time()
+        if now - self._last_heartbeat < 3600:
+            return
+        self._last_heartbeat = now
+
+        mode = self.get_trading_mode()
+        hold_str = ""
+        if self.position.is_holding:
+            price = self._get_price()
+            pnl = self._calc_pnl(price) if price > 0 else 0
+            hold_str = "보유: %s %s (%+.1f%%)" % (self.stock_code, self._stock_name, pnl)
+        else:
+            hold_str = "보유: 없음 (스캔 중)" if self.auto_scan else "보유: 없음"
+
+        # 코스피 상태
+        idx = self._index_cache
+        idx_str = "코스피: %+.1f%%" % idx["change_pct"] if idx else "코스피: 조회중"
+
+        status = "[정기보고] %s | %s | 거래:%d건 | PnL:%+.0f원 | %s" % (
+            mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str)
+
+        logger.info(status)
+        self.telegram.send("<b>📋 주식봇 정기보고</b>\n%s\n%s\n거래: %d건\nPnL: %+.0f원\n%s" % (
+            mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str))
 
     def _send_daily_report_if_needed(self):
         import datetime as dt
