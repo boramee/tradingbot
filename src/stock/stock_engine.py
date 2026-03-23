@@ -30,6 +30,7 @@ from src.strategies.macd import MACDStrategy
 from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
 from src.strategies.adaptive import AdaptiveStrategy
+from src.strategies.fear_greed import FearGreedStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger
 from src.utils.daily_report import DailyReport
@@ -42,6 +43,7 @@ STRATEGY_MAP: Dict[str, type] = {
     "rsi": RSIStrategy, "macd": MACDStrategy,
     "bollinger": BollingerStrategy, "combined": CombinedStrategy,
     "adaptive": AdaptiveStrategy,
+    "feargreed": FearGreedStrategy,
 }
 
 MARKET_OPEN = datetime.time(9, 0)

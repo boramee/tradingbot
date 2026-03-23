@@ -20,6 +20,7 @@ from src.indicators.technical import TechnicalIndicators
 from src.strategies.base import BaseStrategy, Signal, TradeSignal
 from src.strategies.macd import MACDStrategy
 from src.strategies.adaptive import AdaptiveStrategy
+from src.strategies.fear_greed import FearGreedStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger
 from src.utils.daily_report import DailyReport
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 STRATEGY_MAP: Dict[str, type] = {
     "macd": MACDStrategy,
     "adaptive": AdaptiveStrategy,
+    "feargreed": FearGreedStrategy,
 }
 
 US_TOP_STOCKS = {

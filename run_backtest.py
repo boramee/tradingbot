@@ -117,7 +117,7 @@ def main():
     parser.add_argument("--symbol", default="005930", help="종목코드 또는 코인티커")
     parser.add_argument("--type", choices=["stock", "coin", "us"], default="stock")
     parser.add_argument("--strategy", default="all",
-                        choices=["rsi", "macd", "bollinger", "combined", "adaptive", "all"])
+                        choices=["rsi", "macd", "bollinger", "combined", "adaptive", "feargreed", "all"])
     parser.add_argument("--days", type=int, default=365, help="백테스트 기간 (일)")
     parser.add_argument("--capital", type=float, default=10_000_000, help="초기 자금")
     parser.add_argument("--fee", type=float, default=None, help="수수료 (주식:0.00015, 코인:0.0005)")

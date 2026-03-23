@@ -22,6 +22,7 @@ from src.strategies.macd import MACDStrategy
 from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
 from src.strategies.adaptive import AdaptiveStrategy
+from src.strategies.fear_greed import FearGreedStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ STRATEGY_MAP = {
     "rsi": RSIStrategy, "macd": MACDStrategy,
     "bollinger": BollingerStrategy, "combined": CombinedStrategy,
     "adaptive": AdaptiveStrategy,
+    "feargreed": FearGreedStrategy,
 }
 
 

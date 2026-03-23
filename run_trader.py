@@ -62,7 +62,7 @@ def main():
     parser.add_argument("--mode", choices=["scalp", "swing"], default=None,
                         help="프리셋 모드 (scalp=단타, swing=스윙)")
     parser.add_argument("--strategy", default=None,
-                        choices=["rsi", "macd", "bollinger", "combined", "adaptive"])
+                        choices=["rsi", "macd", "bollinger", "combined", "adaptive", "feargreed"])
     parser.add_argument("--interval", type=int, default=None, help="조회 주기 (초)")
     parser.add_argument("--candle", default=None,
                         help="캔들 간격 (minute1/minute3/minute5/minute15/minute60/day)")

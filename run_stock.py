@@ -33,7 +33,7 @@ def main():
     parser = argparse.ArgumentParser(description="주식 자동매매 봇 (한국투자증권)")
     parser.add_argument("--code", default="005930", help="종목코드 (기본: 005930 삼성전자)")
     parser.add_argument("--strategy", default="adaptive",
-                        choices=["rsi", "macd", "bollinger", "combined", "adaptive"])
+                        choices=["rsi", "macd", "bollinger", "combined", "adaptive", "feargreed"])
     parser.add_argument("--interval", type=int, default=10, help="조회 주기 (초)")
     parser.add_argument("--invest-ratio", type=float, default=0.1, help="투자 비율")
     parser.add_argument("--max-invest", type=int, default=500000, help="1회 최대 투자 (원)")
