@@ -36,6 +36,7 @@ from src.utils.safety import KillSwitch, TradeLogger
 from src.utils.daily_report import DailyReport
 from .kis_client import KISClient
 from .scanner import StockScanner
+from src.intelligence.market_sentiment import MarketSentiment
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class StockEngine:
         self.adv = AdvancedIndicators()
         self.strategy = STRATEGY_MAP.get(strategy_name.lower(), MACDStrategy)()
         self.scanner = StockScanner(self.kis)
+        self.sentiment = MarketSentiment(self.kis)
         self.position = StockPosition(code=stock_code)
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
         self.kill_switch = KillSwitch(max_daily_loss_pct=3.0)
@@ -643,16 +645,21 @@ class StockEngine:
         else:
             hold_str = "보유: 없음 (스캔 중)" if self.auto_scan else "보유: 없음"
 
-        # 코스피 상태
+        # 코스피 + 심리 상태
         idx = self._index_cache
         idx_str = "코스피: %+.1f%%" % idx["change_pct"] if idx else "코스피: 조회중"
 
-        status = "[정기보고] %s | %s | 거래:%d건 | PnL:%+.0f원 | %s" % (
-            mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str)
+        sent = self.sentiment.analyze()
+        sent_str = "심리: %s(%d점)" % (sent.sentiment, sent.score)
+        if sent.vkospi > 0:
+            sent_str += " VKOSPI:%.1f" % sent.vkospi
+
+        status = "[정기보고] %s | %s | 거래:%d건 | PnL:%+.0f원 | %s | %s" % (
+            mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str, sent_str)
 
         logger.info(status)
-        self.telegram.send("<b>📋 주식봇 정기보고</b>\n%s\n%s\n거래: %d건\nPnL: %+.0f원\n%s" % (
-            mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str))
+        self.telegram.send("<b>📋 주식봇 정기보고</b>\n%s\n%s\n거래: %d건\nPnL: %+.0f원\n%s\n%s" % (
+            mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str, sent_str))
 
     def _send_daily_report_if_needed(self):
         import datetime as dt

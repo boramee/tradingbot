@@ -24,6 +24,7 @@ from src.strategies.fear_greed import FearGreedStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger, APIGuard
 from src.utils.daily_report import DailyReport
+from src.intelligence.correlation import CoinCorrelation
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class TraderEngine:
         self._last_report_date: str = ""
         self._last_indicators: Dict = {}
         self._last_heartbeat: float = 0
+        self.correlation = CoinCorrelation()
 
         self._daily_trades = 0
         self._max_daily_trades = 10
@@ -487,10 +489,28 @@ class TraderEngine:
                     logger.debug("[대기] 직전 매수가 근처 (%.1f%% 차이)", price_diff)
                     return
 
+            # BTC 상관관계 체크 (알트코인만)
+            corr = self.correlation.get_signal_modifier(self.ticker)
+            if not corr["buy_allowed"]:
+                logger.debug("[BTC연동] %s 매수 차단: %s", self.ticker, corr["reason"])
+                return
+
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
-            min_atr = current_price * 0.005  # ATR 최소: 가격의 0.5%
+            min_atr = current_price * 0.005
             if atr < min_atr:
                 atr = min_atr
+
+            # BTC 추세에 따라 신뢰도 보정
+            if corr["confidence_boost"] != 0:
+                sig = TradeSignal(
+                    sig.signal,
+                    min(1.0, max(0, sig.confidence + corr["confidence_boost"])),
+                    sig.reason + " | " + corr["reason"],
+                    sig.price,
+                )
+                if not sig.is_actionable:
+                    return
+
             if self._buy(sig.reason, current_atr=atr):
                 self._last_buy_time = now
                 self._last_buy_price = current_price
