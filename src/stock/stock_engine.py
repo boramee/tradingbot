@@ -257,6 +257,47 @@ class StockEngine(BaseTradingEngine):
             return info["price"]
         return 0
 
+    # ── 지표 스냅샷 ──
+
+    def _indicator_summary(self, df) -> str:
+        """현재 기술 지표 요약 (텔레그램용)"""
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[-1]
+        parts = []
+        if "rsi" in df.columns and pd.notna(row.get("rsi")):
+            rsi = float(row["rsi"])
+            tag = "과매도" if rsi < 30 else "과매수" if rsi > 70 else "중립"
+            parts.append("RSI: %.1f (%s)" % (rsi, tag))
+        if "macd" in df.columns and pd.notna(row.get("macd")):
+            macd_val = float(row["macd"])
+            hist = float(row["macd_hist"]) if "macd_hist" in df.columns and pd.notna(row.get("macd_hist")) else 0
+            parts.append("MACD: %.2f (hist:%.2f)" % (macd_val, hist))
+        if "adx" in df.columns and pd.notna(row.get("adx")):
+            adx = float(row["adx"])
+            tag = "강한추세" if adx > 25 else "횡보"
+            parts.append("ADX: %.0f (%s)" % (adx, tag))
+        if "bb_pct_b" in df.columns and pd.notna(row.get("bb_pct_b")):
+            parts.append("BB%%B: %.2f" % float(row["bb_pct_b"]))
+        if "volume_ratio" in df.columns and pd.notna(row.get("volume_ratio")):
+            parts.append("거래량: %.1f배" % float(row["volume_ratio"]))
+        if "atr" in df.columns and pd.notna(row.get("atr")):
+            parts.append("ATR: %.0f" % float(row["atr"]))
+        return "\n".join(parts)
+
+    def _market_summary(self) -> str:
+        """시장 맥락 요약 (텔레그램용)"""
+        parts = []
+        idx = self._index_cache
+        if idx:
+            parts.append("코스피: %+.1f%%" % idx["change_pct"])
+        sent = self.sentiment.analyze()
+        if sent:
+            parts.append("심리: %s(%d점)" % (sent.sentiment, sent.score))
+            if sent.vkospi > 0:
+                parts.append("VKOSPI: %.1f" % sent.vkospi)
+        return " | ".join(parts)
+
     # ── 매매 실행 ──
 
     def _buy(self, reason: str, current_atr: float = 0, confidence: float = 0.5) -> bool:
@@ -289,9 +330,44 @@ class StockEngine(BaseTradingEngine):
             logger.info("[매수] %s %s | %d주 × %s원 = %s원 | %s",
                         self.stock_code, self._stock_name, qty,
                         "{:,}".format(price), "{:,}".format(qty * price), reason)
-            self.telegram.notify_buy(
-                "%s %s" % (self.stock_code, self._stock_name),
-                price, qty * price, reason)
+
+            # 목표가 / 손절가 계산
+            tp1, tp2 = self.get_partial_triggers(price, current_atr)
+            if current_atr > 0:
+                stop_price = int(price - current_atr * self.atr_stop_multiplier)
+            else:
+                stop_price = int(price * (1 - self.stop_loss_pct / 100))
+            tp1_price = int(price * (1 + tp1 / 100))
+            tp2_price = int(price * (1 + tp2 / 100))
+
+            outlook = (
+                "📊 <b>진입 근거</b>\n%s\n\n"
+                "🎯 <b>목표/손절</b>\n"
+                "1차 익절: %s원 (+%.1f%%)\n"
+                "2차 익절: %s원 (+%.1f%%)\n"
+                "손절가: %s원 (%.1f%%)\n"
+                "신뢰도: %.0f%%\n\n"
+                "📈 <b>기술 지표</b>\n%s\n\n"
+                "🌐 <b>시장</b>\n%s"
+            ) % (
+                self.telegram.escape(reason),
+                "{:,}".format(tp1_price), tp1,
+                "{:,}".format(tp2_price), tp2,
+                "{:,}".format(stop_price),
+                (stop_price - price) / price * 100,
+                confidence * 100,
+                self._indicator_summary(self._last_df) or "N/A",
+                self._market_summary() or "N/A",
+            )
+
+            self.telegram.send(
+                "<b>🟢 매수</b>\n"
+                "종목: <code>%s %s</code>\n"
+                "가격: %s원 × %d주 = %s원\n\n%s"
+                % (self.stock_code, self.telegram.escape(self._stock_name),
+                   "{:,}".format(price), qty, "{:,}".format(qty * price),
+                   outlook)
+            )
             self.trade_logger.log(
                 bot="stock_trader", side="BUY", symbol=self.stock_code,
                 exchange="KIS", price=price, quantity=qty, amount=qty * price,
@@ -334,9 +410,48 @@ class StockEngine(BaseTradingEngine):
             logger.info("%s %s %s | %d주 × %s원 | 수익: %+.2f%% | %s",
                         tag, self.stock_code, self._stock_name, qty,
                         "{:,}".format(price), pnl_pct, reason)
-            self.telegram.notify_sell(
-                "%s %s" % (self.stock_code, self._stock_name),
-                price, pnl_pct, tag + " " + reason)
+
+            # 보유 기간 계산
+            hold_sec = time.time() - self.position.entry_time if self.position.entry_time else 0
+            if hold_sec >= 3600:
+                hold_str = "%.1f시간" % (hold_sec / 3600)
+            else:
+                hold_str = "%d분" % max(1, int(hold_sec / 60))
+
+            emoji = "💰" if pnl_pct >= 1.0 else "🟡" if pnl_pct >= 0 else "🔴"
+            remaining = holding["quantity"] - qty if partial else 0
+
+            sell_detail = (
+                "📊 <b>매도 근거</b>\n%s\n\n"
+                "💵 <b>손익</b>\n"
+                "매입가: %s원 → 매도가: %s원\n"
+                "수익: %+,.0f원 (%+.2f%%)\n"
+                "보유: %s\n"
+            ) % (
+                self.telegram.escape(reason),
+                "{:,}".format(self.position.avg_price),
+                "{:,}".format(price),
+                pnl_amount, pnl_pct,
+                hold_str,
+            )
+
+            if partial:
+                sell_detail += "잔여: %d주 (분할매도)\n" % remaining
+
+            sell_detail += "\n📈 <b>기술 지표</b>\n%s\n\n🌐 <b>시장</b>\n%s" % (
+                self._indicator_summary(self._last_df) or "N/A",
+                self._market_summary() or "N/A",
+            )
+
+            self.telegram.send(
+                "<b>%s %s</b>\n"
+                "종목: <code>%s %s</code>\n"
+                "가격: %s원 × %d주\n"
+                "수익률: <b>%+.2f%%</b>\n\n%s"
+                % (emoji, "분할매도" if partial else "매도",
+                   self.stock_code, self.telegram.escape(self._stock_name),
+                   "{:,}".format(price), qty, pnl_pct, sell_detail)
+            )
             self.trade_logger.log(
                 bot="stock_trader", side="SELL", symbol=self.stock_code,
                 exchange="KIS", price=price, quantity=qty, amount=qty * price,
