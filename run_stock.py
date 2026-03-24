@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--auto-scan", action="store_true",
                         help="자동 스캔 모드: 거래대금 상위 종목 자동 탐색 및 매매")
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--preflight", action="store_true",
+                        help="사전점검만 실행 (매매 시작하지 않음)")
 
     args = parser.parse_args()
     setup_logger(args.log_level)
@@ -65,6 +67,10 @@ def main():
         telegram_token=os.getenv("TELEGRAM_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )
+
+    if args.preflight:
+        ok = engine.preflight_check()
+        sys.exit(0 if ok else 1)
 
     engine.start(poll_sec=args.interval)
 

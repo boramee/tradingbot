@@ -726,6 +726,75 @@ class StockEngine(BaseTradingEngine):
 
     # ── 시작 ──
 
+    def preflight_check(self) -> bool:
+        """실전 투입 전 사전점검. 문제가 있으면 False 반환 + 텔레그램 리포트."""
+        checks = []
+
+        # 1. KIS 인증
+        if self.kis.is_authenticated:
+            checks.append(("KIS 인증", True, "토큰 정상"))
+        else:
+            checks.append(("KIS 인증", False, "토큰 없음 — .env에 KIS_APP_KEY/SECRET 확인"))
+
+        # 2. 잔고 조회
+        cash = 0
+        if self.kis.is_authenticated:
+            balance = self.kis.get_balance()
+            if balance and balance.get("cash", 0) > 0:
+                cash = balance["cash"]
+                checks.append(("잔고 조회", True, "%s원" % "{:,}".format(cash)))
+            else:
+                checks.append(("잔고 조회", False, "잔고 0원 또는 조회 실패"))
+        else:
+            checks.append(("잔고 조회", False, "인증 필요"))
+
+        # 3. 시세 조회
+        price = self._get_price()
+        if price > 0:
+            checks.append(("시세 조회", True, "%s %s: %s원" % (
+                self.stock_code, self._stock_name, "{:,}".format(price))))
+        else:
+            checks.append(("시세 조회", False, "%s 시세 조회 실패" % self.stock_code))
+
+        # 4. 텔레그램
+        if self.telegram.enabled:
+            checks.append(("텔레그램", True, "활성화"))
+        else:
+            checks.append(("텔레그램", False, "비활성 — TELEGRAM_TOKEN/CHAT_ID 확인"))
+
+        # 5. 투자 가능 여부
+        if cash > 0 and price > 0:
+            max_qty = min(int(cash * self.invest_ratio), self.max_invest_krw) // price
+            if max_qty > 0:
+                checks.append(("매수 가능", True, "최대 %d주 (약 %s원)" % (
+                    max_qty, "{:,}".format(max_qty * price))))
+            else:
+                checks.append(("매수 가능", False, "투자금 부족 (잔고: %s원, 주가: %s원)" % (
+                    "{:,}".format(cash), "{:,}".format(price))))
+
+        # 6. 거래 모드
+        if self.kis.is_virtual:
+            checks.append(("거래 모드", True, "⚠️ 모의투자"))
+        else:
+            checks.append(("거래 모드", True, "🔴 실전"))
+
+        # 결과 종합
+        all_ok = all(ok for _, ok, _ in checks)
+        lines = []
+        for name, ok, detail in checks:
+            mark = "✅" if ok else "❌"
+            lines.append("%s %s: %s" % (mark, name, detail))
+
+        report = "\n".join(lines)
+        logger.info("[사전점검] %s\n%s", "통과" if all_ok else "실패", report)
+
+        tg_report = "<b>🔍 사전점검 %s</b>\n\n%s" % ("통과 ✅" if all_ok else "실패 ❌", report)
+        if not all_ok:
+            tg_report += "\n\n⚠️ 실패 항목을 확인하세요."
+        self.telegram.send(tg_report)
+
+        return all_ok
+
     def start(self, poll_sec: int = 10):
         self.running = True
 
@@ -752,6 +821,15 @@ class StockEngine(BaseTradingEngine):
         logger.info("  필터: 코스피급락 + 수급 + 체결강도 + VI + 갭")
         logger.info("  장: 09:05관망→10:00골든→14:30청산")
         logger.info("=" * 60)
+
+        # 실전 모드: 사전점검 필수
+        if not self.kis.is_virtual and self.kis.is_authenticated:
+            if not self.preflight_check():
+                logger.error("사전점검 실패 — 봇을 시작할 수 없습니다.")
+                return
+        else:
+            self.preflight_check()
+
         self.telegram.notify_start(scan_str, "주식 %s" % self.strategy.name, mode_str)
 
         while self.running:
