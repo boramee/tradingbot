@@ -4,6 +4,10 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
+# .env 파일 로드
+set -a
+[ -f "$DIR/.env" ] && source "$DIR/.env"
+set +a
 VENV="$DIR/venv/bin/python3"
 LOG="$DIR/stock_bot.log"
 PIDFILE="$DIR/.stock_bot.pid"
