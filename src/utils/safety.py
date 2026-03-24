@@ -17,7 +17,10 @@ class KillSwitch:
     """일일 손실 한도 초과 시 당일 매매 강제 중단.
 
     초기 자금 대비 N% 이상 손실나면 그날은 더 이상 매매하지 않음.
+    재시작해도 킬스위치 상태가 유지되도록 파일에 저장.
     """
+
+    _STATE_FILE = "logs/killswitch_state.json"
 
     def __init__(self, max_daily_loss_pct: float = 3.0, initial_capital: float = 0):
         self.max_daily_loss_pct = max_daily_loss_pct
@@ -25,6 +28,7 @@ class KillSwitch:
         self._daily_pnl: float = 0.0
         self._date: str = ""
         self._killed: bool = False
+        self._load_state()
 
     def record_trade(self, pnl_amount: float):
         self._reset_if_new_day()
@@ -38,6 +42,8 @@ class KillSwitch:
         if self._daily_pnl < 0 and loss_pct >= self.max_daily_loss_pct:
             self._killed = True
             logger.warning("[KILL SWITCH] 일일 손실 %.1f%% → 당일 매매 중단", loss_pct)
+
+        self._save_state()
 
     def is_killed(self) -> bool:
         self._reset_if_new_day()
@@ -55,6 +61,39 @@ class KillSwitch:
             self._daily_pnl = 0.0
             self._killed = False
             self._date = today
+            self._save_state()
+
+    def _save_state(self):
+        """킬스위치 상태를 파일에 저장 (재시작 시 복원)"""
+        import json
+        try:
+            os.makedirs(os.path.dirname(self._STATE_FILE), exist_ok=True)
+            with open(self._STATE_FILE, "w") as f:
+                json.dump({
+                    "date": self._date,
+                    "daily_pnl": self._daily_pnl,
+                    "killed": self._killed,
+                }, f)
+        except Exception:
+            pass
+
+    def _load_state(self):
+        """파일에서 킬스위치 상태 복원"""
+        import json
+        try:
+            if os.path.exists(self._STATE_FILE):
+                with open(self._STATE_FILE, "r") as f:
+                    state = json.load(f)
+                saved_date = state.get("date", "")
+                if saved_date == date.today().isoformat():
+                    self._date = saved_date
+                    self._daily_pnl = state.get("daily_pnl", 0.0)
+                    self._killed = state.get("killed", False)
+                    if self._killed:
+                        logger.warning("[KILL SWITCH] 파일에서 복원 — 킬스위치 활성 (PnL: %+.0f원)",
+                                       self._daily_pnl)
+        except Exception:
+            pass
 
 
 class TradeLogger:

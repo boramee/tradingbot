@@ -46,7 +46,8 @@ class Position:
     entry_time: float = 0.0
     highest_price: float = 0.0
     entry_atr: float = 0.0
-    partial_sold: bool = False   # 1차 분할매도 완료 여부
+    partial_sold: bool = False   # 호환용 (1단계 완료 여부)
+    partial_stage: int = 0       # 다단계 분할매도 단계 (0=미매도, 1=1차, 2=2차)
 
     @property
     def is_holding(self) -> bool:
@@ -246,14 +247,15 @@ class TraderEngine:
         gross = (sell_price - self.position.avg_price) / self.position.avg_price * 100
         return gross - self.round_trip_fee_pct
 
-    def _sell(self, reason: str, partial: bool = False) -> bool:
-        """전량 매도 또는 분할 매도"""
+    def _sell(self, reason: str, partial: bool = False, partial_pct: float = 0) -> bool:
+        """전량 매도 또는 분할 매도. partial_pct: 현재 보유량의 N% 매도."""
         full_volume = self._get_coin_balance() if self._upbit else self.position.volume
         if full_volume <= 0:
             return False
 
         if partial:
-            sell_volume = full_volume * (self.partial_exit_pct / 100)
+            pct = partial_pct if partial_pct > 0 else self.partial_exit_pct
+            sell_volume = full_volume * (pct / 100)
         else:
             sell_volume = full_volume
 
@@ -294,6 +296,8 @@ class TraderEngine:
         if partial:
             self.position.volume = full_volume - sell_volume
             self.position.partial_sold = True
+            # 분할매도 후 최고가를 현재가로 리셋 → 트레일링 스톱 기준 갱신
+            self.position.highest_price = price
         else:
             self._track_loss(pnl_pct)
             self.position = Position(ticker=self.ticker)
@@ -347,14 +351,26 @@ class TraderEngine:
         return net_pnl <= -self.stop_loss_pct
 
     def _check_trailing_stop(self, current_price: float) -> bool:
-        """트레일링 스톱 (수수료 포함): 최고점 대비 N% 하락 시 익절."""
+        """ATR 기반 트레일링 스톱: 최고점에서 ATR×1.5 하락 시 익절.
+        ATR 없으면 고정 % 폴백.
+        수익이 take_profit_pct 이상일 때만 활성화.
+        """
         if self.position.avg_price <= 0 or self.position.highest_price <= 0:
             return False
 
         net_pnl = self._calc_pnl(current_price)
-        if net_pnl < self.take_profit_pct:
+        # 2단계 이상 분할매도 후에는 즉시 트레일링 활성화
+        min_pnl = self.take_profit_pct * 0.5 if self.position.partial_stage >= 2 else self.take_profit_pct
+        if net_pnl < min_pnl:
             return False
 
+        # ATR 기반: 최고점에서 ATR×1.5 하락
+        if self.position.entry_atr > 0:
+            trail_distance = self.position.entry_atr * 1.5
+            trail_price = self.position.highest_price - trail_distance
+            return current_price <= trail_price
+
+        # 폴백: 고정 %
         drop_from_high = (self.position.highest_price - current_price) / self.position.highest_price * 100
         return drop_from_high >= self.trailing_pct
 
@@ -373,6 +389,11 @@ class TraderEngine:
         """트레일링 스톱 상세 사유"""
         gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
         drop = (self.position.highest_price - current_price) / self.position.highest_price * 100
+        if self.position.entry_atr > 0:
+            trail_dist = self.position.entry_atr * 1.5
+            return "ATR트레일링 익절 (수익:+%.1f%%, 최고:%s, ATR하락:%s)" % (
+                gain, "{:,.0f}".format(self.position.highest_price),
+                "{:,.0f}".format(trail_dist))
         return "트레일링 익절 (수익:+%.1f%%, 최고점:%s, 하락:%.1f%%)" % (
             gain, "{:,.0f}".format(self.position.highest_price), drop)
 
@@ -413,9 +434,13 @@ class TraderEngine:
         self._update_higher_timeframe()
 
         # 포지션 동기화 (API 키 있을 때)
+        # 실제 잔고를 기준으로 하되, 분할매도 상태/최고가/ATR은 보존
         if self._upbit:
-            self.position.volume = self._get_coin_balance()
-            self.position.avg_price = self._get_avg_buy_price()
+            api_volume = self._get_coin_balance()
+            api_avg_price = self._get_avg_buy_price()
+            self.position.volume = api_volume
+            self.position.avg_price = api_avg_price
+            # entry_atr, highest_price, partial_sold, entry_time은 보존
 
         is_holding = self.position.volume > 0 and self.position.avg_price > 0
 
@@ -431,23 +456,35 @@ class TraderEngine:
                 self.telegram.notify_stop_loss(self.ticker, current_price, abs(net_loss))
                 self._sell(detail)
                 self._last_stop_loss_time = time.time()
-                self._last_trade_time = time.time()
+                self._last_sell_time = time.time()  # 버그수정: 손절도 매도 시간 기록
                 return
 
-            # 분할매도: 수수료 차감 후 익절 기준의 75% 도달 시 (v3: 60%→75%)
-            partial_trigger = self.take_profit_pct * 0.75
-            if not self.position.partial_sold and gain_pct >= partial_trigger:
+            # 다단계 분할익절: 1차(60%) 30%, 2차(100%) 30%, 나머지 트레일링
+            stage = self.position.partial_stage
+            tp = self.take_profit_pct
+
+            if stage == 0 and gain_pct >= tp * 0.6:
                 self._sell(
-                    "1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, partial_trigger),
-                    partial=True,
+                    "1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, tp * 0.6),
+                    partial=True, partial_pct=30.0,
                 )
+                self.position.partial_stage = 1
                 return
 
-            # 트레일링 스톱 (나머지 물량)
+            if stage == 1 and gain_pct >= tp:
+                self._sell(
+                    "2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, tp),
+                    partial=True, partial_pct=30.0,
+                )
+                self.position.partial_stage = 2
+                return
+
+            # ATR 기반 트레일링 스톱 (나머지 40% 물량)
             if self._check_trailing_stop(current_price):
                 detail = self._get_trailing_detail(current_price)
                 self.telegram.notify_take_profit(self.ticker, current_price, gain_pct)
                 self._sell(detail)
+                self._last_sell_time = time.time()
                 return
 
         # 쿨다운 체크
@@ -481,10 +518,10 @@ class TraderEngine:
             if now - self._last_stop_loss_time < self._stop_loss_lockout:
                 return
 
-            # 직전 매수가 근처(±0.5%)에서 재매수 방지
+            # 직전 매수가 근처(±1.0%)에서 재매수 방지 (v3.1: 0.5%→1.0%)
             if self._last_buy_price > 0:
                 price_diff = abs(current_price - self._last_buy_price) / self._last_buy_price * 100
-                if price_diff < 0.5:
+                if price_diff < 1.0:
                     logger.debug("[대기] 직전 매수가 근처 (%.1f%% 차이)", price_diff)
                     return
 

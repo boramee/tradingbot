@@ -37,7 +37,7 @@ class AdvancedIndicators:
 
     @staticmethod
     def detect_rsi_divergence(
-        df: pd.DataFrame, lookback: int = 14
+        df: pd.DataFrame, lookback: int = 25
     ) -> Optional[str]:
         """RSI 다이버전스 감지
 
