@@ -14,6 +14,7 @@ STRATEGY="${STRATEGY:-macd}"
 INVEST_RATIO="${INVEST_RATIO:-0.2}"
 MAX_INVEST="${MAX_INVEST:-300000}"
 SCAN="${SCAN:-1}"                 # 기본: 자동스캔. 끄려면 SCAN=0
+REAL="${REAL:-1}"                  # 기본: 실전. 모의투자는 REAL=0
 
 start() {
     if is_running; then
