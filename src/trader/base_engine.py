@@ -63,9 +63,13 @@ class BaseTradingEngine:
         self._last_buy_price: float = 0
         self._last_sell_profitable: bool = False
 
-        # 승률 기반 적응형 포지션 사이징
+        # 승률 기반 적응형 포지션 사이징 (Kelly Criterion 겸용)
         self._recent_results: List[float] = []
-        self._win_rate_window = 20
+        self._win_rate_window = 100  # v6: 20 → 100 (Kelly 정밀도 확보)
+        self._kelly_fraction = 0.15  # Fractional Kelly: f*의 15%만 사용 (파산 방지)
+
+        # v6: 타임스톱 — 보유 시간 초과 시 기회비용 청산
+        self._time_stop_minutes: float = 0  # 0이면 비활성 (서브클래스에서 설정)
 
         # ADX 적응형 트레일링용 df 캐시
         self._last_df: Optional[pd.DataFrame] = None
@@ -251,8 +255,42 @@ class BaseTradingEngine:
         else:
             self._consecutive_losses = 0
 
+    def get_kelly_fraction(self) -> float:
+        """v6: Kelly Criterion 기반 최적 투자 비중 (Fractional Kelly)
+
+        f* = (p(r+1) - 1) / r
+        여기서 p=승률, r=평균승/평균패 비율 (손익비)
+        실제로는 f*의 _kelly_fraction(기본 15%)만 사용하여 파산 위험 최소화.
+        데이터 부족(<10회) 시 보수적 기본값 반환.
+        """
+        n = len(self._recent_results)
+        if n < 10:
+            return 0.1  # 데이터 부족 시 10% 배분
+
+        wins = [r for r in self._recent_results if r > 0]
+        losses = [abs(r) for r in self._recent_results if r < 0]
+
+        if not wins or not losses:
+            return 0.1
+
+        p = len(wins) / n  # 승률
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+        r = avg_win / avg_loss if avg_loss > 0 else 1.0  # 손익비
+
+        # Kelly 공식: f* = (p(r+1) - 1) / r
+        f_star = (p * (r + 1) - 1) / r if r > 0 else 0
+
+        # 음수 Kelly → 기대값 음수, 최소 배분
+        if f_star <= 0:
+            return 0.05
+
+        # Fractional Kelly: 파산 방지
+        fractional = f_star * self._kelly_fraction
+        return max(0.05, min(fractional, 0.5))  # 5% ~ 50% 범위
+
     def get_win_rate_multiplier(self) -> float:
-        """승률 기반 포지션 크기 보정 (0.6 ~ 1.3)"""
+        """승률 기반 포지션 크기 보정 (0.6 ~ 1.3) — Kelly 보조"""
         if len(self._recent_results) < 5:
             return 1.0
         wins = sum(1 for r in self._recent_results if r > 0)
@@ -264,7 +302,21 @@ class BaseTradingEngine:
         return 1.0
 
     def get_confidence_multiplier(self, confidence: float) -> float:
-        """신뢰도 × 승률 기반 투자금 배수"""
+        """v6: 신뢰도 × Kelly Criterion 기반 투자금 배수
+
+        Kelly 비중이 충분한 데이터로 계산되면 Kelly 기반,
+        아니면 기존 선형 방식 폴백.
+        """
+        # Kelly 기반 (데이터 충분 시)
+        if len(self._recent_results) >= 10:
+            kelly_f = self.get_kelly_fraction()
+            # confidence로 보정: 확신이 높을수록 Kelly 비중에 가까이
+            # confidence=1.0 → kelly_f 그대로, confidence=0.5 → kelly_f × 0.7
+            conf_adj = 0.4 + confidence * 0.6  # [0.4, 1.0]
+            mult = kelly_f * conf_adj / 0.1  # 0.1(기본)을 1.0배로 정규화
+            return max(0.3, min(mult, 1.8))
+
+        # 폴백: 기존 선형 방식
         conf_mult = 0.6 + confidence * 1.2
         wr_mult = self.get_win_rate_multiplier()
         return min(conf_mult * wr_mult, 1.8)
@@ -285,6 +337,82 @@ class BaseTradingEngine:
         hour = dt.datetime.utcnow().hour
 
         return self._learner.confidence_modifier(rsi=rsi, adx=adx, vol_ratio=vol, hour=hour)
+
+    # ── 타임스톱 ──
+
+    def check_time_stop(self, entry_time: float, avg_price: float, current_price: float) -> bool:
+        """v6: 보유 시간 초과 시 기회비용 청산
+
+        진입 후 _time_stop_minutes 경과 + 수익 없음 → 청산.
+        수익이 발생한 포지션은 타임스톱 대상에서 제외.
+        """
+        if self._time_stop_minutes <= 0 or entry_time <= 0:
+            return False
+
+        elapsed_min = (time.time() - entry_time) / 60
+        if elapsed_min < self._time_stop_minutes:
+            return False
+
+        # 수익 중이면 타임스톱 적용 안 함 (트레일링에 맡김)
+        pnl = self.calc_pnl(avg_price, current_price)
+        if pnl > 0.5:  # 0.5% 이상 수익이면 유지
+            return False
+
+        logger.info("[타임스톱] %.0f분 보유, 수익 %+.2f%% → 기회비용 청산", elapsed_min, pnl)
+        return True
+
+    def get_time_stop_detail(self, entry_time: float, avg_price: float, current_price: float) -> str:
+        elapsed = (time.time() - entry_time) / 60
+        pnl = self.calc_pnl(avg_price, current_price)
+        return "타임스톱 (%.0f분 보유, PnL:%+.2f%%, 기준:%d분)" % (elapsed, pnl, self._time_stop_minutes)
+
+    # ── 호가창 매물대 필터 ──
+
+    @staticmethod
+    def calc_orderbook_support_score(
+        orderbook_bids: list,
+        current_price: float,
+        atr: float,
+    ) -> float:
+        """v6: 호가창 매수벽 기반 지지 강도 점수 (0.0 ~ 1.0)
+
+        매수 호가 중 현재가 기준 ATR 1배 이내에 대량 매수벽(Big Wall)이
+        있는지 분석. 지지선에 가까울수록 높은 점수.
+
+        Args:
+            orderbook_bids: [(price, size), ...] 매수 호가 리스트
+            current_price: 현재가
+            atr: 현재 ATR 값
+
+        Returns:
+            0.0~1.0 지지 강도 (0=매수벽 없음, 1=강력한 매수벽)
+        """
+        if not orderbook_bids or atr <= 0 or current_price <= 0:
+            return 0.5  # 데이터 없으면 중립
+
+        # ATR 1배 이내의 매수 호가 총량 계산
+        support_zone = current_price - atr
+        zone_volume = 0.0
+        total_volume = 0.0
+
+        for price, size in orderbook_bids:
+            amount = float(price) * float(size)
+            total_volume += amount
+            if float(price) >= support_zone:
+                zone_volume += amount
+
+        if total_volume <= 0:
+            return 0.5
+
+        # 지지대 매물 비중 (전체 대비)
+        ratio = zone_volume / total_volume
+
+        # (현재가 - 지지대 하단) / ATR → 가까울수록 높은 점수
+        distance_score = max(0, 1.0 - (current_price - support_zone) / atr)
+
+        # 종합: 매물비중 70% + 거리 30%
+        score = ratio * 0.7 + distance_score * 0.3
+        return max(0.0, min(1.0, score))
 
     # ── 자동 학습 ──
 

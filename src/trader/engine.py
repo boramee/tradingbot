@@ -28,6 +28,7 @@ from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger, APIGuard
 from src.utils.daily_report import DailyReport
 from src.intelligence.correlation import CoinCorrelation
+from src.risk.portfolio_heat import PortfolioHeat
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,12 @@ class TraderEngine(BaseTradingEngine):
         ]
         self._session_conf_boost = 0.05  # 활성 세션 신뢰도 보너스
         self._session_conf_penalty = 0.1  # 비활성 세션 신뢰도 감점
+
+        # v6: 타임스톱 (코인: 4시간)
+        self._time_stop_minutes = 240
+
+        # v6: 포트폴리오 열지수 (글로벌 노출도 관리)
+        self._portfolio_heat = PortfolioHeat(max_exposure_pct=70.0)
 
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
@@ -450,6 +457,15 @@ class TraderEngine(BaseTradingEngine):
                 self._last_sell_time = time.time()
                 return
 
+            # v6: 타임스톱 — 일정 시간 보유 후 수익 없으면 기회비용 청산
+            if self.check_time_stop(self.position.entry_time,
+                                    self.position.avg_price, current_price):
+                detail = self.get_time_stop_detail(
+                    self.position.entry_time, self.position.avg_price, current_price)
+                self._sell(detail)
+                self._last_sell_time = time.time()
+                return
+
         # 쿨다운 체크
         if self._is_cooled_down():
             remaining = int((self._cooldown_until - time.time()) / 60) + 1
@@ -473,6 +489,11 @@ class TraderEngine(BaseTradingEngine):
             if self.check_rebuy_cooldown(now):
                 return
 
+            # v6: 포트폴리오 글로벌 컷 — 전체 노출도 초과 시 매수 차단
+            if self._portfolio_heat.is_overheated():
+                logger.debug("[글로벌컷] 포트폴리오 노출도 초과 → 매수 차단")
+                return
+
             # 직전 매수가 근처(±1.0%)에서 재매수 방지 (v3.1: 0.5%→1.0%)
             if self._last_buy_price > 0:
                 price_diff = abs(current_price - self._last_buy_price) / self._last_buy_price * 100
@@ -490,6 +511,19 @@ class TraderEngine(BaseTradingEngine):
             min_atr = current_price * 0.005
             if atr < min_atr:
                 atr = min_atr
+
+            # v6: 호가창 매수벽 지지 강도 분석
+            ob_score = self._get_orderbook_support_score(atr)
+            if ob_score < 0.2:
+                logger.debug("[호가필터] 매수벽 부족 (%.2f < 0.2) → 매수 보류", ob_score)
+                return
+            if ob_score > 0.6:
+                sig = TradeSignal(
+                    sig.signal,
+                    min(1.0, sig.confidence + 0.05),
+                    sig.reason + " | 호가지지%.0f%%" % (ob_score * 100),
+                    sig.price,
+                )
 
             # BTC 추세에 따라 신뢰도 보정
             if corr["confidence_boost"] != 0:
@@ -538,6 +572,24 @@ class TraderEngine(BaseTradingEngine):
             if self._sell(sig.reason):
                 self._last_sell_time = now
                 self._last_sell_profitable = pnl_before > 0
+
+    def _get_orderbook_support_score(self, atr: float) -> float:
+        """v6: 업비트 호가창에서 매수벽 지지 강도 분석"""
+        try:
+            ob = pyupbit.get_orderbook(self.ticker)
+            if not ob:
+                return 0.5
+            data = ob[0] if isinstance(ob, list) else ob
+            units = data.get("orderbook_units", [])
+            if not units:
+                return 0.5
+
+            bids = [(float(u["bid_price"]), float(u["bid_size"])) for u in units]
+            price = bids[0][0] if bids else self._get_current_price()
+            return self.calc_orderbook_support_score(bids, price, atr)
+        except Exception as e:
+            logger.debug("[호가필터] 조회 실패: %s", e)
+            return 0.5  # 실패 시 중립
 
     def _update_higher_timeframe(self):
         """상위 타임프레임 추세를 주기적으로 갱신"""
@@ -638,6 +690,12 @@ class TraderEngine(BaseTradingEngine):
             pnl = self._calc_pnl(price) if price > 0 else 0
             hold_str = "보유: %s 평단:%s 수익:%+.1f%%" % (
                 self.ticker, "{:,.0f}".format(self.position.avg_price), pnl)
+
+        # v6: 포트폴리오 열지수 업데이트
+        krw_bal = self._get_krw_balance()
+        pos_val = self.position.volume * self._get_current_price() if self.position.is_holding else 0
+        self._portfolio_heat.register(
+            "coin_%s" % self.ticker, position_krw=pos_val, total_krw=krw_bal + pos_val)
 
         status = "[정기보고] %s | %s | 거래:%d건 | PnL:%+.0f원" % (
             self.ticker, hold_str, self._daily_trades, self.kill_switch.daily_pnl)
