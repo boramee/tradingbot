@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 import signal
@@ -158,6 +159,16 @@ class TraderEngine:
         self._recent_results: List[float] = []  # 최근 20건 수익률
         self._win_rate_window = 20
 
+        # v5: 세션 기반 거래 필터 (UTC 시간)
+        # 연구: UTC 16-17시(KST 01-02시) 거래량/변동성 피크
+        # 고유동성 세션에서만 신규 진입, 저유동성 세션에서는 보수적
+        self._active_sessions_utc = [
+            (7, 11),   # 아시아 세션 (KST 16-20)
+            (13, 18),  # 유럽-미국 교차 (KST 22-03) — 피크 포함
+        ]
+        self._session_conf_boost = 0.05  # 활성 세션 신뢰도 보너스
+        self._session_conf_penalty = 0.1  # 비활성 세션 신뢰도 감점
+
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
         return cls()
@@ -196,6 +207,14 @@ class TraderEngine:
         return float(p) if p else 0.0
 
     # ── 매매 실행 ──
+
+    def _is_active_session(self) -> bool:
+        """v5: 현재 UTC 시간이 고유동성 세션인지 확인"""
+        hour = dt.datetime.utcnow().hour
+        for start, end in self._active_sessions_utc:
+            if start <= hour < end:
+                return True
+        return False
 
     def _get_win_rate_multiplier(self) -> float:
         """v4: 최근 승률 기반 포지션 크기 보정
@@ -639,6 +658,20 @@ class TraderEngine:
                     sig.price,
                 )
                 if not sig.is_actionable:
+                    return
+
+            # v5: 세션 기반 신뢰도 보정
+            if self._is_active_session():
+                session_adj = self._session_conf_boost
+            else:
+                session_adj = -self._session_conf_penalty
+            if session_adj != 0:
+                adjusted_conf = min(1.0, max(0, sig.confidence + session_adj))
+                sig = TradeSignal(sig.signal, adjusted_conf,
+                                  sig.reason + (" | 활성세션" if session_adj > 0 else " | 비활성세션"),
+                                  sig.price)
+                if not sig.is_actionable:
+                    logger.debug("[세션필터] 비활성 세션 → 신뢰도 부족")
                     return
 
             if self._buy(sig.reason, current_atr=atr, confidence=sig.confidence):

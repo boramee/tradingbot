@@ -76,7 +76,27 @@ class TechnicalIndicators:
         df["ma_long"] = df["close"].rolling(self.ma_long).mean()
 
     def _add_atr(self, df: pd.DataFrame, tr: pd.Series) -> None:
-        df["atr"] = tr.rolling(self.atr_period).mean()
+        """v5: Integrated ATR — 전통 ATR + ROC + 거래량 반응
+        전통 ATR은 과거 데이터 기반이라 실시간 변동성에 둔감.
+        가격 변화율(ROC)과 거래량 편차를 통합하여 현 시황에 민감하게 대응.
+        """
+        base_atr = tr.rolling(self.atr_period).mean()
+
+        # ROC (Rate of Change): 직전 봉 대비 가격 변화 비율
+        roc = df["close"].pct_change().abs()
+        roc_ma = roc.rolling(self.atr_period).mean()
+        # ROC 편차: 현재 ROC가 평균보다 얼마나 큰지
+        roc_dev = (roc / roc_ma.replace(0, np.nan)).fillna(1.0).clip(0.5, 3.0)
+
+        # 거래량 편차: 현재 거래량이 평균보다 얼마나 큰지
+        vol_ma = df["volume"].rolling(20).mean()
+        vol_dev = (df["volume"] / vol_ma.replace(0, np.nan)).fillna(1.0).clip(0.5, 3.0)
+
+        # 통합: base_ATR × (1 + α×ROC편차 + β×거래량편차) / (1 + α + β)
+        # 정규화하여 기존 ATR 스케일과 호환 유지
+        alpha, beta = 0.3, 0.2
+        integrated = base_atr * (1 + alpha * (roc_dev - 1) + beta * (vol_dev - 1))
+        df["atr"] = integrated
 
     def _add_adx(self, df: pd.DataFrame, tr: pd.Series, period: int = 14) -> None:
         """ADX (Average Directional Index) - 추세 강도 지표

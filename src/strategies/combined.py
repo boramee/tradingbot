@@ -1,15 +1,14 @@
-"""고급 복합 전략 v3
+"""고급 복합 전략 v4
 
-v2 → v3 변경점:
-  1. MA 정배열 필수 조건 제거 → 보너스로 전환 (정배열이면 신뢰도 ↑)
-  2. DI 방향 필수 조건 제거 → 보너스로 전환
-  3. 저항선/지지선 근처에서 진입 차단 완화 (감점만, 완전 차단 X)
-  4. 상위TF 하락 시 매수 차단 → 신뢰도 감점으로 완화
-  5. 횡보장에서도 볼린저 신호가 강하면 진입 허용
-  6. 거래량 필터 0.8 → 0.5로 완화
+v3 → v4 변경점:
+  1. 다중시간대 필터 강화: HTF MACD 방향 + RSI 과매수/과매도 추가
+     - HTF MACD 상승 + LTF 매수 → 보너스
+     - HTF RSI > 75 → 매수 억제 (고점 과열)
+     - HTF RSI < 30 → 매수 보너스 (반등 가능)
+  2. 기존 v3 완화 정책 유지 (보너스/감점 방식)
 
-이유: v2는 너무 많은 조건이 AND로 묶여서 진입 기회가 거의 없었음.
-     실전에서 수익을 내려면 적절한 진입 빈도가 필요.
+연구: 4시간봉 MACD 전략이 1시간 이하 전략보다 2배 이상 높은 수익률.
+     상위 시간대 추세 필터가 허위신호를 가장 효과적으로 제거.
 """
 
 from __future__ import annotations
@@ -45,15 +44,17 @@ class CombinedStrategy(BaseStrategy):
         ]
         self._adv = AdvancedIndicators()
         self._higher_tf_trend: Optional[str] = None
+        self._htf_macd_rising: Optional[bool] = None   # v4: HTF MACD 히스토그램 상승 여부
+        self._htf_rsi: Optional[float] = None           # v4: HTF RSI 값
         self._htf_ticker: str = ""
         self._htf_indicators: Optional["TechnicalIndicators"] = None
 
     @property
     def name(self) -> str:
-        return "Combined_v3"
+        return "Combined_v4"
 
     def set_higher_timeframe(self, ticker: str, htf_interval: str = "minute60"):
-        """상위 타임프레임 추세 캐시 (엔진에서 주기적 호출)"""
+        """v4: 상위 타임프레임 추세 + MACD 방향 + RSI 캐시"""
         try:
             if self._htf_indicators is None:
                 from src.indicators.technical import TechnicalIndicators
@@ -64,7 +65,25 @@ class CombinedStrategy(BaseStrategy):
                 df = self._htf_indicators.add_all(df)
                 self._higher_tf_trend = self._adv.classify_market(df)
                 self._htf_ticker = ticker
-                logger.debug("상위TF 추세: %s (%s)", self._higher_tf_trend, htf_interval)
+
+                # v4: HTF MACD 히스토그램 방향 (상승 중인지)
+                if "macd_hist" in df.columns and len(df) >= 3:
+                    h1 = df["macd_hist"].iloc[-1]
+                    h2 = df["macd_hist"].iloc[-2]
+                    if pd.notna(h1) and pd.notna(h2):
+                        self._htf_macd_rising = float(h1) > float(h2)
+                    else:
+                        self._htf_macd_rising = None
+                # v4: HTF RSI (과매수/과매도 감지)
+                if "rsi" in df.columns:
+                    rsi_val = df["rsi"].iloc[-1]
+                    self._htf_rsi = float(rsi_val) if pd.notna(rsi_val) else None
+
+                logger.debug("상위TF: %s, MACD↑:%s, RSI:%.0f (%s)",
+                             self._higher_tf_trend,
+                             self._htf_macd_rising,
+                             self._htf_rsi or 0,
+                             htf_interval)
         except Exception as e:
             logger.debug("상위TF 조회 실패: %s", e)
 
@@ -116,6 +135,8 @@ class CombinedStrategy(BaseStrategy):
         plus_di = self._last(df, "plus_di")
         minus_di = self._last(df, "minus_di")
         htf = self._higher_tf_trend
+        htf_macd_rising = self._htf_macd_rising
+        htf_rsi = self._htf_rsi
 
         # 이동평균선 정배열/역배열 → 보너스
         if ma_s is not None and ma_l is not None:
@@ -168,8 +189,25 @@ class CombinedStrategy(BaseStrategy):
             if htf == "trending_up":
                 conf = min(1.0, conf + 0.1)
 
+            # v4: HTF MACD 상승 + LTF 매수 → 강한 확인
+            if htf_macd_rising is True:
+                conf = min(1.0, conf + 0.1)
+                reasons.append("HTF_MACD↑")
+            elif htf_macd_rising is False:
+                conf *= 0.8
+                reasons.append("HTF_MACD↓")
+
+            # v4: HTF RSI 과매수 → 매수 억제 (고점 과열)
+            if htf_rsi is not None:
+                if htf_rsi > 75:
+                    conf *= 0.6
+                    reasons.append("HTF_RSI과열%.0f" % htf_rsi)
+                elif htf_rsi < 30:
+                    conf = min(1.0, conf + 0.1)
+                    reasons.append("HTF_RSI과매도%.0f" % htf_rsi)
+
             tag = " | ".join(reasons) if reasons else "없음"
-            if conf >= 0.45:  # v3.1: 0.35→0.45 (저품질 신호 걸러냄, is_actionable≥0.5 이중 필터)
+            if conf >= 0.45:
                 return TradeSignal(Signal.BUY, conf,
                                    "매수%s%s: %s" % (mkt_str, htf_str, tag), price)
 
@@ -184,6 +222,23 @@ class CombinedStrategy(BaseStrategy):
 
             if divergence == "bearish":
                 conf = min(1.0, conf + 0.1)
+
+            # v4: HTF MACD 하락 + LTF 매도 → 매도 확인 강화
+            if htf_macd_rising is False:
+                conf = min(1.0, conf + 0.1)
+                reasons.append("HTF_MACD↓확인")
+            elif htf_macd_rising is True:
+                conf *= 0.7
+                reasons.append("HTF_MACD↑→매도억제")
+
+            # v4: HTF RSI 과매도 → 매도 억제 (바닥 가능)
+            if htf_rsi is not None:
+                if htf_rsi < 30:
+                    conf *= 0.6
+                    reasons.append("HTF_RSI과매도%.0f" % htf_rsi)
+                elif htf_rsi > 75:
+                    conf = min(1.0, conf + 0.1)
+                    reasons.append("HTF_RSI과열%.0f" % htf_rsi)
 
             tag = " | ".join(reasons) if reasons else "없음"
             if conf >= 0.45:
