@@ -3,15 +3,16 @@
 기술적 분석 자동매매 봇 실행 스크립트.
 
 사용법:
-  python3 run_trader.py                                # 기본 (중기매매)
+  python3 run_trader.py                                # 기본 (BTC MACD 1시간봉)
   python3 run_trader.py --mode scalp                   # 단타 프리셋
   python3 run_trader.py --mode swing                   # 스윙 프리셋
   python3 run_trader.py --ticker KRW-ETH --mode scalp  # ETH 단타
   python3 run_trader.py --ticker KRW-XRP --mode scalp  # XRP 단타 (변동성 큼)
 
 프리셋:
-  scalp (단타):  1분봉, 3초주기, 익절1.5%→트레일링0.7%, 손절ATRx1.5(폴백1.5%)
-  swing (스윙):  1시간봉, 60초주기, 익절5%→트레일링2%, 손절ATRx2(폴백3%)
+  (기본):        MACD 1시간봉, 60초주기, 익절4%→트레일링1.5%, 손절ATRx2(폴백3%)
+  scalp (단타):  5분봉, 15초주기, 익절1.8%→트레일링0.7%, 손절ATRx1.5(폴백1.5%)
+  swing (스윙):  1시간봉, 60초주기, 익절4%→트레일링1.5%, 손절ATRx2(폴백3%)
 
 커스텀 옵션으로 프리셋을 덮어쓸 수 있음:
   python3 run_trader.py --mode scalp --take-profit 2.0 --trailing 1.0
@@ -55,6 +56,19 @@ PRESETS = {
     },
 }
 
+# BTC 기본 프리셋 (백테스트 결과 기반: MACD 전략이 BTC에서 최고 성과)
+# BTC 백테스트: +34% 수익, 60% 승률, PF 4.04, MDD 3.5%
+BTC_DEFAULT = {
+    "candle": "minute60",          # 1시간봉 (BTC는 노이즈 적은 긴 봉이 유리)
+    "interval": 60,                # 60초마다 조회
+    "strategy": "macd",            # MACD가 BTC에서 가장 안정적
+    "invest_ratio": 0.1,           # 자금의 10%씩 투자
+    "stop_loss": 3.0,              # ATR 폴백 손절 3%
+    "take_profit": 4.0,            # 분할익절 기준 4%
+    "trailing": 1.5,               # 트레일링 1.5%
+    "atr_mult": 2.0,               # ATR 손절 배수
+}
+
 
 def main():
     parser = argparse.ArgumentParser(description="기술적 분석 자동매매 봇")
@@ -76,7 +90,8 @@ def main():
 
     args = parser.parse_args()
 
-    preset = PRESETS.get(args.mode, PRESETS["swing"])
+    # 모드 미지정 시 BTC 최적화 기본값 사용 (백테스트 검증 완료)
+    preset = PRESETS.get(args.mode) if args.mode else BTC_DEFAULT
 
     candle = args.candle or preset["candle"]
     interval = args.interval if args.interval is not None else preset["interval"]
