@@ -36,11 +36,11 @@ PRESETS = {
     "scalp": {
         "candle": "minute5",
         "interval": 15,
-        "strategy": "rsi",
+        "strategy": "adaptive",       # v3: rsi→adaptive (5분봉에서 RSI 30/70 거의 안 닿음)
         "invest_ratio": 0.05,
-        "stop_loss": 2.0,
-        "take_profit": 2.5,
-        "trailing": 1.0,
+        "stop_loss": 1.5,             # v3: 2.0→1.5 (스캘프는 손절 빠르게)
+        "take_profit": 1.8,           # v3: 2.5→1.8 (현실적 목표)
+        "trailing": 0.7,              # v3: 1.0→0.7 (익절 더 타이트)
         "atr_mult": 1.5,
     },
     "swing": {
@@ -49,8 +49,8 @@ PRESETS = {
         "strategy": "combined",
         "invest_ratio": 0.1,
         "stop_loss": 3.0,
-        "take_profit": 5.0,
-        "trailing": 2.0,
+        "take_profit": 4.0,           # v3: 5.0→4.0 (더 자주 익절)
+        "trailing": 1.5,              # v3: 2.0→1.5 (트레일링 타이트)
         "atr_mult": 2.0,
     },
 }
