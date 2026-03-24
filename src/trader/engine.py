@@ -104,7 +104,7 @@ class TraderEngine:
         self.take_profit_pct = take_profit_pct
         self.trailing_pct = trailing_pct
         self.atr_stop_multiplier = atr_stop_multiplier
-        self.partial_exit_pct = 50.0
+        self.partial_exit_pct = 40.0            # v3: 50% → 40% (수익 포지션 더 오래 유지)
         self.partial_trigger_pct = None
         self.fee_rate = 0.0005                # 업비트 수수료 0.05%
         self.round_trip_fee_pct = self.fee_rate * 2 * 100  # 왕복 0.1%
@@ -141,10 +141,10 @@ class TraderEngine:
         self._last_alert_time: float = 0
         self._last_buy_time: float = 0       # 마지막 매수 시각
         self._last_sell_time: float = 0      # 마지막 매도 시각
-        self._min_buy_interval = 300          # 매수 후 최소 5분 대기
-        self._min_rebuy_interval = 600        # 매도 후 재매수까지 10분 대기
+        self._min_buy_interval = 180          # v3: 5분 → 3분 (기회 놓침 방지)
+        self._min_rebuy_interval = 300        # v3: 10분 → 5분 (재진입 기회 확보)
         self._last_stop_loss_time: float = 0
-        self._stop_loss_lockout = 900         # 손절 후 15분 재진입 금지
+        self._stop_loss_lockout = 600         # v3: 15분 → 10분 (손절 후 재진입 유연화)
         self._last_buy_price: float = 0       # 직전 매수가 기록
 
     def _make_strategy(self, name: str) -> BaseStrategy:
@@ -186,9 +186,11 @@ class TraderEngine:
 
     # ── 매매 실행 ──
 
-    def _buy(self, reason: str, current_atr: float = 0.0) -> bool:
+    def _buy(self, reason: str, current_atr: float = 0.0, confidence: float = 0.5) -> bool:
         krw = self._get_krw_balance()
-        amount = min(krw * self.invest_ratio, self.max_invest_krw)
+        # v3: 신뢰도 기반 투자금 조절 (0.5→기본, 0.8→1.4배, 1.0→1.8배)
+        conf_multiplier = 0.6 + confidence * 1.2
+        amount = min(krw * self.invest_ratio * conf_multiplier, self.max_invest_krw)
         if amount < 5000:
             logger.info("[매수 불가] 잔고 부족: %.0f원 (투자금: %.0f원 < 최소 5,000원)", krw, amount)
             self._alert_once(
@@ -307,10 +309,7 @@ class TraderEngine:
                     "[쿨다운] %d연속 손실 → %d분 매매 중지",
                     self._consecutive_losses, self._cooldown_minutes,
                 )
-                self.telegram.send(
-                    "<b>⏸ 쿨다운 발동</b>\n%d연속 손실 → %d분 대기"
-                    % (self._consecutive_losses, self._cooldown_minutes)
-                )
+                self.telegram.notify_cooldown(self._consecutive_losses, self._cooldown_minutes)
         else:
             self._consecutive_losses = 0
 
@@ -435,8 +434,8 @@ class TraderEngine:
                 self._last_trade_time = time.time()
                 return
 
-            # 분할매도: 수수료 차감 후 익절 기준의 60% 도달 시
-            partial_trigger = self.take_profit_pct * 0.6
+            # 분할매도: 수수료 차감 후 익절 기준의 75% 도달 시 (v3: 60%→75%)
+            partial_trigger = self.take_profit_pct * 0.75
             if not self.position.partial_sold and gain_pct >= partial_trigger:
                 self._sell(
                     "1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, partial_trigger),
@@ -511,7 +510,7 @@ class TraderEngine:
                 if not sig.is_actionable:
                     return
 
-            if self._buy(sig.reason, current_atr=atr):
+            if self._buy(sig.reason, current_atr=atr, confidence=sig.confidence):
                 self._last_buy_time = now
                 self._last_buy_price = current_price
 
@@ -607,7 +606,7 @@ class TraderEngine:
         logger.info("봇 종료 완료")
 
     def _heartbeat(self):
-        """매 시간 상태 로그"""
+        """매 시간 상태 로그 + 텔레그램 전송"""
         now = time.time()
         if now - self._last_heartbeat < 3600:
             return
@@ -623,6 +622,8 @@ class TraderEngine:
         status = "[정기보고] %s | %s | 거래:%d건 | PnL:%+.0f원" % (
             self.ticker, hold_str, self._daily_trades, self.kill_switch.daily_pnl)
         logger.info(status)
+        self.telegram.notify_heartbeat(
+            self.ticker, hold_str, self._daily_trades, self.kill_switch.daily_pnl)
 
     def _send_daily_report_if_needed(self):
         """날짜가 바뀌면 전일 리포트를 텔레그램으로 전송"""

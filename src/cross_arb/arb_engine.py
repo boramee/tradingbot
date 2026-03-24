@@ -95,6 +95,7 @@ class CrossArbEngine:
         poll_interval: int = 5,
         telegram_token: str = "",
         telegram_chat_id: str = "",
+        live: bool = False,
     ):
         self.coins = [c.strip().upper() for c in coins.split(",")]
         self.min_profit_pct = min_profit_pct
@@ -120,6 +121,7 @@ class CrossArbEngine:
         self._trade_logger = __import__("src.utils.safety", fromlist=["TradeLogger"]).TradeLogger()
         self._kill_switch = __import__("src.utils.safety", fromlist=["KillSwitch"]).KillSwitch(max_daily_loss_pct=5.0)
         self.running = False
+        self._simulation_only = not live       # 기본: 모의 모드 강제
         self.trade_logs: List[ArbTradeLog] = []
         self._daily_pnl_usdt = 0.0
         self._daily_trades = 0
@@ -247,7 +249,7 @@ class CrossArbEngine:
     # ── 매매 실행 ──
 
     def _execute(self, opp: ArbOpportunity) -> bool:
-        """동시 매수/매도 실행"""
+        """동시 매수/매도 실행 (simulation_only=True이면 항상 시뮬레이션)"""
         if self._kill_switch.is_killed():
             return False
 
@@ -263,6 +265,22 @@ class CrossArbEngine:
         if not self._check_orderbook_depth(coin, sell_side, trade_usdt):
             logger.info("[호가부족] %s 매도 호가 5단계 물량 부족", opp.sell_exchange)
             return False
+
+        # 모의 모드 강제: API 키가 있어도 시뮬레이션만 실행
+        if self._simulation_only:
+            if opp.buy_exchange == "binance":
+                trade_krw = min(self.max_trade_krw, 1_000_000)
+                trade_usdt = trade_krw / opp.fx_rate
+                coin_qty = trade_usdt / opp.buy_price
+                logger.info("[모의] %s 바이낸스 매수 %.6f + 업비트 매도 | 순수익: %+.3f%%",
+                            coin, coin_qty, opp.net_profit_pct)
+            else:
+                trade_krw = min(self.max_trade_krw, 1_000_000)
+                trade_usdt = trade_krw / opp.fx_rate
+                logger.info("[모의] %s 업비트 매수 %s원 + 바이낸스 매도 | 순수익: %+.3f%%",
+                            coin, "{:,}".format(trade_krw), opp.net_profit_pct)
+            self._record_trade(opp, trade_usdt)
+            return True
 
         if opp.buy_exchange == "binance":
             trade_krw = min(self.max_trade_krw, self._get_upbit_coin_value(coin))
@@ -516,7 +534,12 @@ class CrossArbEngine:
         signal.signal(signal.SIGINT, _stop)
         signal.signal(signal.SIGTERM, _stop)
 
-        mode = "실거래" if self._upbit else "시뮬레이션"
+        if self._simulation_only:
+            mode = "모의거래 (실거래 비활성화)"
+        elif self._upbit:
+            mode = "실거래"
+        else:
+            mode = "시뮬레이션 (API키 없음)"
         logger.info("=" * 60)
         logger.info("  거래소 간 재정거래 봇 시작")
         logger.info("  코인: %s", ", ".join(self.coins))

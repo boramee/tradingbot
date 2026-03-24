@@ -26,6 +26,12 @@ class ArbitrageBot:
         self.config = config or AppConfig()
         self.running = False
 
+        # 재정거래봇은 기본 모의 모드 강제
+        if live:
+            logger.warning("⚠️  재정거래봇 실거래 모드 활성화 — 실제 자금 사용!")
+        else:
+            logger.info("📊 재정거래봇 모의 모드 (실거래: --live 플래그 필요)")
+
         setup_logger(self.config.log_level)
 
         logger.info("=" * 60)
@@ -52,7 +58,7 @@ class ArbitrageBot:
         self.execution = ExecutionEngine(
             self.exchanges, self.risk_manager, self.config.arbitrage, self.fx_provider,
         )
-        self.execution.dry_run = not live
+        self.execution.dry_run = True  # 재정거래는 항상 시뮬레이션 (실거래 비활성화)
 
         self.dashboard = Dashboard()
 
@@ -62,7 +68,7 @@ class ArbitrageBot:
             os.getenv("TELEGRAM_CHAT_ID", ""),
         )
 
-        mode = "실거래" if live else "시뮬레이션"
+        mode = "모의거래 (실거래 비활성화)"
         logger.info("실행 모드: %s", mode)
         logger.info("최소 수익률: %.2f%%", self.config.arbitrage.min_profit_pct)
         logger.info("최대 슬리피지: %.2f%%", self.config.arbitrage.max_slippage_pct)
