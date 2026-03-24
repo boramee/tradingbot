@@ -1,13 +1,12 @@
-"""백테스트 엔진 v2 - 실제 매매 엔진과 동일한 v3 로직 적용
+"""백테스트 엔진 v3 - 실제 매매 엔진 v4 로직 동기화
 
-변경점 (v1→v2):
-  - 다단계 분할익절: 1차(60%) 30% + 2차(100%) 30% + 나머지 트레일링
-  - ATR 기반 트레일링 스톱 (최고점에서 ATR×1.5 하락)
-  - 신뢰도 기반 투자금 조절
-  - 매도 신호에 의한 청산 추가
-  - 슬리피지 시뮬레이션 (0.05%)
-  - 재매수 쿨다운 (5봉)
-  - Buy & Hold 대비 수익률 표시
+변경점 (v2→v3):
+  - ATR 기반 동적 분할익절: ATR×1.5 / ATR×3.0 (고정% 폴백)
+  - ADX 적응형 트레일링 스톱: 추세 강도에 따라 배수 조절
+  - 분할익절 후 보호적 스톱 (손익분기 / 이익보장)
+  - 거래량 클라이맥스 감지 → 트레일링 타이트닝
+  - 수익 매도 후 빠른 재진입 (쿨다운 차등 적용)
+  - 승률 기반 적응형 포지션 사이징
 """
 
 from __future__ import annotations
@@ -101,7 +100,7 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """과거 데이터 기반 전략 백테스트 (v2 - 실전 엔진 동일 로직)"""
+    """과거 데이터 기반 전략 백테스트 (v3 - 실전 엔진 v4 동기화)"""
 
     def __init__(
         self,
@@ -136,6 +135,28 @@ class BacktestEngine:
             return price * (1 + self.slippage_pct)
         return price * (1 - self.slippage_pct)
 
+    @staticmethod
+    def _get_adx(row) -> float:
+        """ADX 값 안전 추출"""
+        v = row.get("adx")
+        return float(v) if pd.notna(v) else 0
+
+    @staticmethod
+    def _get_vol_ratio(row) -> float:
+        """거래량 비율 안전 추출"""
+        v = row.get("vol_ratio")
+        return float(v) if pd.notna(v) else 0
+
+    def _trail_multiplier(self, adx: float, vol_ratio: float) -> float:
+        """v4: ADX 적응형 트레일링 배수 + 거래량 클라이맥스"""
+        if vol_ratio > 3.0:
+            return 0.8  # 거래량 클라이맥스 → 반전 임박
+        if adx >= 30:
+            return 2.5  # 강한 추세
+        if adx >= 20:
+            return 1.5  # 보통
+        return 1.0      # 약한 추세
+
     def run(
         self,
         df: pd.DataFrame,
@@ -163,6 +184,11 @@ class BacktestEngine:
         entry_bar = 0
         last_sell_bar = -999
         last_buy_price = 0.0
+        last_sell_profitable = False
+
+        # v4: 승률 추적
+        recent_results: List[float] = []
+        win_rate_window = 20
 
         for i in range(warmup, len(df)):
             window = df.iloc[:i + 1]
@@ -172,18 +198,43 @@ class BacktestEngine:
             low = float(row["low"])
             date_str = str(df.index[i])[:10]
             atr = float(row["atr"]) if pd.notna(row.get("atr")) else 0
+            adx = self._get_adx(row)
+            vol_ratio = self._get_vol_ratio(row)
 
             if position:
-                # 최고가 갱신 (고가 기준이 더 현실적)
                 if high > highest:
                     highest = high
 
                 net_pnl = (price - entry_price) / entry_price * 100 - self.round_trip_fee
 
+                # ── v4: 보호적 손절 (분할익절 후 손익분기/이익보장) ──
+                if partial_stage >= 1:
+                    if partial_stage >= 2 and entry_atr > 0:
+                        protect_price = entry_price + entry_atr * 0.5
+                    else:
+                        protect_price = entry_price * (1 + self.fee_rate * 2)
+                    if low <= protect_price:
+                        exit_price = self._apply_slippage(max(protect_price, low), False)
+                        actual_pnl = (exit_price - entry_price) / entry_price * 100 - self.round_trip_fee
+                        sell_val = coin_qty * exit_price * (1 - self.fee_rate)
+                        capital += sell_val
+                        reason_tag = "보호스톱%d차후" % partial_stage
+                        trades.append(BacktestTrade(
+                            entry_date, date_str, entry_price, exit_price, actual_pnl,
+                            entry_reason, "%s(%.1f%%)" % (reason_tag, actual_pnl), i - entry_bar))
+                        position = False
+                        last_sell_bar = i
+                        last_buy_price = entry_price
+                        last_sell_profitable = actual_pnl > 0
+                        recent_results.append(actual_pnl)
+                        if len(recent_results) > win_rate_window:
+                            recent_results.pop(0)
+                        continue
+
                 # ── 손절 (ATR 기반 우선, 폴백 고정%) ──
                 if entry_atr > 0:
                     stop_price = entry_price - entry_atr * self.atr_stop_mult
-                    hit_stop = low <= stop_price  # 저가 기준 체크
+                    hit_stop = low <= stop_price
                     exit_price = self._apply_slippage(max(stop_price, low), False)
                 else:
                     hit_stop = net_pnl <= -self.stop_loss_pct
@@ -199,42 +250,56 @@ class BacktestEngine:
                     position = False
                     last_sell_bar = i
                     last_buy_price = entry_price
+                    last_sell_profitable = False
+                    recent_results.append(actual_pnl)
+                    if len(recent_results) > win_rate_window:
+                        recent_results.pop(0)
                     continue
 
-                # ── 다단계 분할매도 ──
+                # ── v4: ATR 기반 동적 분할매도 ──
                 tp = self.take_profit_pct
 
-                # 1차: 60% 도달 시 30% 매도
-                if partial_stage == 0 and net_pnl >= tp * 0.6:
+                if entry_atr > 0 and entry_price > 0:
+                    atr_tp1 = (entry_atr * 1.5) / entry_price * 100
+                    atr_tp2 = (entry_atr * 3.0) / entry_price * 100
+                    tp1_trigger = min(tp * 0.6, atr_tp1)
+                    tp2_trigger = min(tp, atr_tp2)
+                else:
+                    tp1_trigger = tp * 0.6
+                    tp2_trigger = tp
+
+                if partial_stage == 0 and net_pnl >= tp1_trigger:
                     sell_qty = coin_qty * 0.3
                     sell_price = self._apply_slippage(price, False)
                     capital += sell_qty * sell_price * (1 - self.fee_rate)
                     coin_qty -= sell_qty
                     partial_stage = 1
-                    highest = price  # 리셋
+                    highest = price
                     continue
 
-                # 2차: 100% 도달 시 30% 매도
-                if partial_stage == 1 and net_pnl >= tp:
+                if partial_stage == 1 and net_pnl >= tp2_trigger:
                     sell_qty = coin_qty * 0.3
                     sell_price = self._apply_slippage(price, False)
                     capital += sell_qty * sell_price * (1 - self.fee_rate)
                     coin_qty -= sell_qty
                     partial_stage = 2
-                    highest = price  # 리셋
+                    highest = price
                     continue
 
-                # ── ATR 기반 트레일링 (나머지 물량) ──
+                # ── v4: ADX 적응형 트레일링 (나머지 물량) ──
                 min_pnl = tp * 0.5 if partial_stage >= 2 else tp
                 if net_pnl >= min_pnl:
+                    trail_mult = self._trail_multiplier(adx, vol_ratio)
+
                     hit_trail = False
                     if entry_atr > 0:
-                        trail_price = highest - entry_atr * self.atr_trail_mult
+                        trail_price = highest - entry_atr * trail_mult
                         hit_trail = low <= trail_price
                         exit_price = self._apply_slippage(max(trail_price, low), False)
                     else:
+                        adjusted_trailing = self.trailing_pct * (trail_mult / 1.5)
                         drop = (highest - price) / highest * 100
-                        hit_trail = drop >= self.trailing_pct
+                        hit_trail = drop >= adjusted_trailing
                         exit_price = self._apply_slippage(price, False)
 
                     if hit_trail:
@@ -247,6 +312,10 @@ class BacktestEngine:
                         position = False
                         last_sell_bar = i
                         last_buy_price = entry_price
+                        last_sell_profitable = actual_pnl > 0
+                        recent_results.append(actual_pnl)
+                        if len(recent_results) > win_rate_window:
+                            recent_results.pop(0)
                         continue
 
                 # ── 매도 신호에 의한 청산 ──
@@ -262,6 +331,10 @@ class BacktestEngine:
                     position = False
                     last_sell_bar = i
                     last_buy_price = entry_price
+                    last_sell_profitable = actual_pnl > 0
+                    recent_results.append(actual_pnl)
+                    if len(recent_results) > win_rate_window:
+                        recent_results.pop(0)
                     continue
 
                 equity_curve.append(capital + coin_qty * price)
@@ -269,21 +342,29 @@ class BacktestEngine:
             else:
                 equity_curve.append(capital)
 
-                # 쿨다운 체크
-                if i - last_sell_bar < self.rebuy_cooldown:
+                # v4: 수익 매도 후 빠른 재진입 (3봉), 손실 매도 후 느린 재진입 (5봉)
+                cooldown = 3 if last_sell_profitable else self.rebuy_cooldown
+                if i - last_sell_bar < cooldown:
                     continue
 
                 sig = self.strategy.analyze(window)
                 if sig.signal == Signal.BUY and sig.is_actionable:
-                    # 직전 매수가 근처 재매수 방지 (±1%)
                     if last_buy_price > 0:
                         diff = abs(price - last_buy_price) / last_buy_price * 100
                         if diff < 1.0:
                             continue
 
-                    # 신뢰도 기반 투자금
+                    # v4: 승률 기반 포지션 사이징
                     conf_mult = 0.6 + sig.confidence * 1.2
-                    invest = capital * self.invest_ratio * min(conf_mult, 1.8)
+                    wr_mult = 1.0
+                    if len(recent_results) >= 5:
+                        wins = sum(1 for r in recent_results if r > 0)
+                        rate = wins / len(recent_results)
+                        if rate > 0.6:
+                            wr_mult = 1.3
+                        elif rate < 0.4:
+                            wr_mult = 0.6
+                    invest = capital * self.invest_ratio * min(conf_mult * wr_mult, 1.8)
 
                     buy_price = self._apply_slippage(price, True)
                     fee = invest * self.fee_rate
