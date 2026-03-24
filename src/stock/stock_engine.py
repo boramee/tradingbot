@@ -413,6 +413,9 @@ class StockEngine(BaseTradingEngine):
     # ── 메인 사이클 ──
 
     def run_once(self):
+        # 하루 1회 자동 학습 (CSV → JSON)
+        self.auto_learn_if_needed("stock_trader")
+
         mode = self.get_trading_mode()
         if mode == "closed":
             return

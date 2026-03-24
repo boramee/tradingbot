@@ -373,6 +373,9 @@ class TraderEngine(BaseTradingEngine):
 
     def run_once(self):
         """한 사이클 실행"""
+        # 하루 1회 자동 학습 (CSV → JSON)
+        self.auto_learn_if_needed("coin_trader")
+
         # Kill Switch 체크
         if self.kill_switch.is_killed():
             return

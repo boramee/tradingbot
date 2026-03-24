@@ -72,6 +72,7 @@ class BaseTradingEngine:
 
         # v2: 학습 결과 기반 신뢰도 보정
         self._learner = TradeLearner()
+        self._last_learn_date: str = ""  # 자동 학습: 마지막 실행 날짜
 
     # ── 수익률 계산 ──
 
@@ -284,6 +285,21 @@ class BaseTradingEngine:
         hour = dt.datetime.utcnow().hour
 
         return self._learner.confidence_modifier(rsi=rsi, adx=adx, vol_ratio=vol, hour=hour)
+
+    # ── 자동 학습 ──
+
+    def auto_learn_if_needed(self, bot_filter: str = ""):
+        """하루 1회 자동 학습: CSV → JSON 저장 → 다음 매수부터 반영"""
+        today = dt.date.today().isoformat()
+        if self._last_learn_date == today:
+            return
+        self._last_learn_date = today
+        try:
+            params = self._learner.learn_and_save(bot_filter)
+            if params.total_trades >= 5:
+                logger.info("[자동학습] %s", params.summary().replace("\n", " | "))
+        except Exception as e:
+            logger.debug("[자동학습] 실패: %s", e)
 
     # ── 쿨다운 ──
 
