@@ -153,6 +153,9 @@ class StockEngine(BaseTradingEngine):
         self._last_block_reason: str = ""
         self._last_block_time: float = 0
         self._last_heartbeat: float = 0
+        self._last_offhour_heartbeat: float = 0
+        self._market_open_notified: str = ""  # 장 시작 알림 날짜
+        self._market_close_notified: bool = False
 
     # ── 시간대 ──
 
@@ -420,6 +423,15 @@ class StockEngine(BaseTradingEngine):
         if mode == "closed":
             return
 
+        # 장 시작 알림 (하루 1회)
+        today = datetime.date.today().isoformat()
+        if self._market_open_notified != today:
+            self._market_open_notified = today
+            self._market_close_notified = False
+            target = self.stock_code if not self.auto_scan else "자동스캔"
+            self.telegram.send("🔔 <b>장 시작</b>\n종목: %s\n모드: %s" % (target, mode))
+            logger.info("[장 시작] %s | %s", target, mode)
+
         df = self._fetch_data()
         if df is None or len(df) < 20:
             return
@@ -634,11 +646,18 @@ class StockEngine(BaseTradingEngine):
                     self._heartbeat()
                 else:
                     now = datetime.datetime.now()
-                    if now.hour == 15 and now.minute == 21:
+                    # 장 마감 알림 (1회)
+                    if not self._market_close_notified and now.hour == 15 and now.minute >= 21:
+                        self._market_close_notified = True
+                        summary = "📴 <b>장 마감</b>\n거래: %d건\nPnL: %+.0f원" % (
+                            self._daily_trades, self.kill_switch.daily_pnl)
+                        self.telegram.send(summary)
                         logger.info("[장 마감] 오늘 거래: %d건, PnL: %+.0f원",
                                     self._daily_trades, self.kill_switch.daily_pnl)
                         self._daily_trades = 0
                         self.scanner.clear_exclusions()
+                    # 장외 시간 생존 확인 (3시간마다)
+                    self._offhour_heartbeat()
 
                 self._send_daily_report_if_needed()
             except Exception as e:
@@ -683,6 +702,16 @@ class StockEngine(BaseTradingEngine):
         logger.info(status)
         self.telegram.send("<b>📋 주식봇 정기보고</b>\n%s\n%s\n거래: %d건\nPnL: %+.0f원\n%s\n%s" % (
             mode, hold_str, self._daily_trades, self.kill_switch.daily_pnl, idx_str, sent_str))
+
+    def _offhour_heartbeat(self):
+        """장외 시간 생존 확인 (3시간마다)"""
+        now = time.time()
+        if now - self._last_offhour_heartbeat < 10800:  # 3h
+            return
+        self._last_offhour_heartbeat = now
+        hour = datetime.datetime.now().strftime("%H:%M")
+        self.telegram.send("💤 주식봇 대기 중 (%s)" % hour)
+        logger.info("[대기 중] 장외 시간 — 봇 정상 작동")
 
     def _send_daily_report_if_needed(self):
         import datetime as dt
