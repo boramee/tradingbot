@@ -15,10 +15,10 @@ case "${1:-status}" in
         "$DIR/bot_arb.sh" start
         echo ""
         echo "===== 국내주식 봇 시작 (09:05~15:20) ====="
-        "$DIR/bot_stock.sh" start
+        REAL=1 "$DIR/bot_stock.sh" start
         echo ""
         echo "===== 미국주식 봇 시작 (22:30~06:00) ====="
-        "$DIR/bot_us.sh" start
+        REAL=1 "$DIR/bot_us.sh" start
         echo ""
         echo "===== 전체 시작 완료 ====="
         echo ""
@@ -33,8 +33,8 @@ case "${1:-status}" in
         "$DIR/bot_eth.sh" stop
         "$DIR/bot_xrp.sh" stop
         "$DIR/bot_arb.sh" stop
-        "$DIR/bot_stock.sh" stop
-        "$DIR/bot_us.sh" stop
+        REAL=1 "$DIR/bot_stock.sh" stop
+        REAL=1 "$DIR/bot_us.sh" stop
         echo "전체 종료 완료"
         ;;
     restart)
