@@ -114,6 +114,14 @@ class USStockEngine:
         self._min_trade_interval = 300
         self._last_report_date = ""
 
+        # v6: 갭 대응 — 시가가 전일 종가 대비 큰 괴리 시 개장 초반 거래 유보
+        self._gap_threshold_pct = 2.0          # 갭 판정 기준 (%)
+        self._gap_wait_minutes = 15            # 갭 발생 시 대기 시간 (분)
+        self._market_open_time: Optional[float] = None  # 장 시작 시각 (epoch)
+        self._prev_close: Dict[str, float] = {}   # 전일 종가 캐시
+        self._gap_detected: Dict[str, float] = {} # 갭 크기 캐시 (심볼 → %)
+        self._was_market_open = False
+
     @staticmethod
     def is_market_open() -> bool:
         """미국 장 오픈 여부 (한국시간 기준)"""
@@ -139,9 +147,80 @@ class USStockEngine:
         gross = (price - pos.avg_price) / pos.avg_price * 100
         return gross - self.FEE_RATE * 2 * 100
 
+    # ── v6: 갭 대응 로직 ──
+
+    def _detect_market_open(self):
+        """장 시작 시점 감지 및 전일 종가 대비 갭 분석"""
+        is_open = self.is_market_open()
+        if is_open and not self._was_market_open:
+            # 장 막 열림 → 시각 기록
+            self._market_open_time = time.time()
+            self._gap_detected.clear()
+            logger.info("[장시작] 미국 장 오픈 감지, 갭 분석 시작")
+        self._was_market_open = is_open
+
+    def _check_gap_and_wait(self, symbol: str) -> Optional[str]:
+        """갭 발생 여부 체크 + 대기 시간 확인.
+        갭이면 대기 사유 문자열 반환, 정상이면 None.
+        """
+        if self._market_open_time is None:
+            return None
+
+        elapsed_min = (time.time() - self._market_open_time) / 60
+
+        # 이미 대기 시간 지남
+        if elapsed_min > self._gap_wait_minutes:
+            return None
+
+        # 갭 크기가 이미 캐시되어 있으면 재계산 불필요
+        if symbol in self._gap_detected:
+            gap_pct = self._gap_detected[symbol]
+            if abs(gap_pct) >= self._gap_threshold_pct:
+                remaining = int(self._gap_wait_minutes - elapsed_min) + 1
+                return "갭 %+.1f%% 감지 → %d분 대기 중" % (gap_pct, remaining)
+            return None
+
+        # 전일 종가 대비 현재 시가 비교
+        excd = self._get_exchange(symbol)
+        info = self.kis.us_get_current_price(symbol, excd)
+        if not info or info["price"] <= 0:
+            return None
+
+        current = info["price"]
+        prev = self._prev_close.get(symbol, 0)
+        if prev <= 0:
+            # 전일 종가 없으면 현재가를 기록하고 갭 없음으로 처리
+            self._prev_close[symbol] = current
+            self._gap_detected[symbol] = 0.0
+            return None
+
+        gap_pct = (current - prev) / prev * 100
+        self._gap_detected[symbol] = gap_pct
+
+        if abs(gap_pct) >= self._gap_threshold_pct:
+            remaining = int(self._gap_wait_minutes - elapsed_min) + 1
+            logger.info("[갭감지] %s 갭 %+.1f%% (전일:$%.2f → 현재:$%.2f) → %d분 대기",
+                        symbol, gap_pct, prev, current, remaining)
+            return "갭 %+.1f%% 감지 → %d분 대기 중" % (gap_pct, remaining)
+        return None
+
+    def _update_prev_close(self, symbol: str, df: pd.DataFrame):
+        """OHLCV 데이터에서 전일 종가 캐시 업데이트"""
+        if df is not None and len(df) >= 2:
+            self._prev_close[symbol] = float(df["close"].iloc[-2])
+
     def run_once(self):
         if not self.is_market_open():
+            # 장 마감 시 전일 종가 갱신 (다음 장 시작 갭 분석용)
+            if self._was_market_open:
+                for symbol in self.symbol_list:
+                    excd = self._get_exchange(symbol)
+                    info = self.kis.us_get_current_price(symbol, excd)
+                    if info and info["price"] > 0:
+                        self._prev_close[symbol] = info["price"]
+            self._detect_market_open()
             return
+        self._detect_market_open()
         if self.kill_switch.is_killed():
             return
 
@@ -195,9 +274,19 @@ class USStockEngine:
                 continue
 
             excd = self._get_exchange(symbol)
+
+            # v6: 갭 대응 — 개장 초반 갭 발생 시 거래 유보
+            gap_reason = self._check_gap_and_wait(symbol)
+            if gap_reason:
+                logger.debug("[갭대기] %s %s", symbol, gap_reason)
+                continue
+
             df = self.kis.us_get_ohlcv(symbol, excd, count=60)
             if df is None or len(df) < 30:
                 continue
+
+            # 전일 종가 캐시 업데이트
+            self._update_prev_close(symbol, df)
 
             df = self.indicators.add_all(df)
             sig = self.strategy.analyze(df)

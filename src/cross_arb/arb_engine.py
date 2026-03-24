@@ -71,7 +71,8 @@ class CrossArbEngine:
 
     UPBIT_FEE = 0.0005       # 0.05%
     BINANCE_FEE = 0.001      # 0.1%
-    TOTAL_FEE_PCT = (UPBIT_FEE + BINANCE_FEE) * 100  # 0.15%
+    BINANCE_MAKER_FEE = 0.0001  # 0.01% (Maker 수수료)
+    TOTAL_FEE_PCT = (UPBIT_FEE + BINANCE_FEE) * 100  # 0.15% (양쪽 Taker)
 
     # 전송 속도/수수료 기준 코인 순위 (리밸런싱용)
     TRANSFER_PRIORITY = {
@@ -81,6 +82,9 @@ class CrossArbEngine:
         "ETH": {"speed": "5분", "fee_usdt": 2.0},
         "BTC": {"speed": "30분", "fee_usdt": 5.0},
     }
+
+    # v6: 동적 최소 수익 안전 마진 배수
+    SAFETY_MARGIN = 1.5
 
     def __init__(
         self,
@@ -98,10 +102,12 @@ class CrossArbEngine:
         live: bool = False,
     ):
         self.coins = [c.strip().upper() for c in coins.split(",")]
+        self._base_min_profit_pct = min_profit_pct  # 사용자 설정 기본값
         self.min_profit_pct = min_profit_pct
         self.max_trade_krw = max_trade_krw
         self.slippage_pct = slippage_pct
         self.poll_interval = poll_interval
+        self._use_maker_strategy = True  # v6: Maker-Maker 전략 활성화
 
         # 업비트
         self._upbit: Optional[pyupbit.Upbit] = None
@@ -174,24 +180,59 @@ class CrossArbEngine:
             "upbit_ask_usdt": upbit_ask / fx_rate,
         }
 
+    def _calc_dynamic_min_profit(self, coin: str, use_maker: bool = False) -> float:
+        """v6: 동적 최소 수익 = (수수료 + 슬리피지 + 전송비용) × 안전마진
+
+        네트워크 전송 비용을 포함하고 안전 마진을 곱하여
+        실제 역마진 위험을 방지.
+        """
+        # 수수료: Maker 전략이면 바이낸스 쪽 Maker 수수료 적용
+        if use_maker:
+            fee_pct = (self.UPBIT_FEE + self.BINANCE_MAKER_FEE) * 100
+        else:
+            fee_pct = self.TOTAL_FEE_PCT
+
+        # 전송 비용 (USDT 기준) → 거래 금액 대비 %로 환산
+        transfer_info = self.TRANSFER_PRIORITY.get(coin)
+        transfer_cost_pct = 0.0
+        if transfer_info:
+            trade_usdt = self.max_trade_krw / self.fx.get_krw_per_usdt()
+            if trade_usdt > 0:
+                transfer_cost_pct = (transfer_info["fee_usdt"] / trade_usdt) * 100
+
+        total_cost = fee_pct + self.slippage_pct + transfer_cost_pct
+        dynamic_min = total_cost * self.SAFETY_MARGIN
+
+        # 사용자 설정 기본값과 비교하여 더 높은 쪽 적용
+        return max(dynamic_min, self._base_min_profit_pct)
+
     def _find_opportunity(self, prices: Dict) -> Optional[ArbOpportunity]:
-        """양방향 재정거래 기회 탐지"""
+        """v6: 양방향 재정거래 기회 탐지 — 동적 최소수익 + Maker 전략"""
         coin = prices["coin"]
         fx = prices["fx_rate"]
 
+        # 동적 최소 수익 계산
+        use_maker = self._use_maker_strategy
+        dynamic_min = self._calc_dynamic_min_profit(coin, use_maker)
+
+        # 수수료 계산 (Maker 전략 적용 여부)
+        if use_maker:
+            effective_fee = (self.UPBIT_FEE + self.BINANCE_MAKER_FEE) * 100
+        else:
+            effective_fee = self.TOTAL_FEE_PCT
+
         # 방향 1: 바이낸스에서 매수(ask) → 업비트에서 매도(bid)
-        # 바이낸스 매수가를 KRW로 변환하여 비교
         bn_ask_krw = prices["binance_ask"] * fx
         spread1_pct = (prices["upbit_bid"] - bn_ask_krw) / bn_ask_krw * 100
-        net1 = spread1_pct - self.TOTAL_FEE_PCT - self.slippage_pct
+        net1 = spread1_pct - effective_fee - self.slippage_pct
 
         # 방향 2: 업비트에서 매수(ask) → 바이낸스에서 매도(bid)
         bn_bid_krw = prices["binance_bid"] * fx
         spread2_pct = (bn_bid_krw - prices["upbit_ask"]) / prices["upbit_ask"] * 100
-        net2 = spread2_pct - self.TOTAL_FEE_PCT - self.slippage_pct
+        net2 = spread2_pct - effective_fee - self.slippage_pct
 
-        # 더 수익이 높은 방향 선택
-        if net1 > net2 and net1 >= self.min_profit_pct:
+        # 더 수익이 높은 방향 선택 (동적 최소 수익 적용)
+        if net1 > net2 and net1 >= dynamic_min:
             return ArbOpportunity(
                 coin=coin, buy_exchange="binance", sell_exchange="upbit",
                 buy_price=prices["binance_ask"], sell_price=prices["upbit_bid"],
@@ -199,7 +240,7 @@ class CrossArbEngine:
                 spread_pct=spread1_pct, net_profit_pct=net1, fx_rate=fx,
             )
 
-        if net2 > net1 and net2 >= self.min_profit_pct:
+        if net2 > net1 and net2 >= dynamic_min:
             return ArbOpportunity(
                 coin=coin, buy_exchange="upbit", sell_exchange="binance",
                 buy_price=prices["upbit_ask"], sell_price=prices["binance_bid"],
@@ -544,8 +585,10 @@ class CrossArbEngine:
         logger.info("  거래소 간 재정거래 봇 시작")
         logger.info("  코인: %s", ", ".join(self.coins))
         logger.info("  모드: %s", mode)
-        logger.info("  최소 순수익: %.2f%% (수수료 %.2f%% + 슬리피지 %.2f%% 포함)",
-                     self.min_profit_pct, self.TOTAL_FEE_PCT, self.slippage_pct)
+        maker_tag = " [Maker전략]" if self._use_maker_strategy else ""
+        logger.info("  최소 순수익: %.2f%% 기본 (동적 = 비용×%.1f 안전마진)%s",
+                     self._base_min_profit_pct, self.SAFETY_MARGIN, maker_tag)
+        logger.info("  수수료: %.2f%% + 슬리피지 %.2f%%", self.TOTAL_FEE_PCT, self.slippage_pct)
         logger.info("  1회 최대: %s원", "{:,}".format(self.max_trade_krw))
         logger.info("  주기: %d초 | 코인별 쿨다운: %d초", self.poll_interval, self._trade_cooldown)
         logger.info("=" * 60)
