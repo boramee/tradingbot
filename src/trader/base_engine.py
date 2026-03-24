@@ -9,11 +9,14 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import time
 from typing import List, Optional
 
 import pandas as pd
+
+from src.intelligence.trade_learner import TradeLearner
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,10 @@ class BaseTradingEngine:
 
         # ADX 적응형 트레일링용 df 캐시
         self._last_df: Optional[pd.DataFrame] = None
+
+        # v2: 학습 결과 기반 신뢰도 보정
+        self._learner = TradeLearner()
+        self._last_learn_date: str = ""  # 자동 학습: 마지막 실행 날짜
 
     # ── 수익률 계산 ──
 
@@ -261,6 +268,38 @@ class BaseTradingEngine:
         conf_mult = 0.6 + confidence * 1.2
         wr_mult = self.get_win_rate_multiplier()
         return min(conf_mult * wr_mult, 1.8)
+
+    def get_learned_confidence_modifier(self) -> float:
+        """v2: 학습 데이터 기반 매수 신뢰도 보정 (-0.15 ~ +0.15)
+
+        현재 지표(RSI, ADX, 거래량, 시간대)와 과거 승률 패턴을 비교하여
+        매수 신뢰도를 자동 보정. 데이터 부족 시 보정 없음(0).
+        """
+        if self._last_df is None:
+            return 0.0
+
+        last = self._last_df.iloc[-1]
+        rsi = float(last.get("rsi", 0)) if pd.notna(last.get("rsi")) else 0
+        adx = float(last.get("adx", 0)) if pd.notna(last.get("adx")) else 0
+        vol = float(last.get("vol_ratio", 0)) if pd.notna(last.get("vol_ratio")) else 0
+        hour = dt.datetime.utcnow().hour
+
+        return self._learner.confidence_modifier(rsi=rsi, adx=adx, vol_ratio=vol, hour=hour)
+
+    # ── 자동 학습 ──
+
+    def auto_learn_if_needed(self, bot_filter: str = ""):
+        """하루 1회 자동 학습: CSV → JSON 저장 → 다음 매수부터 반영"""
+        today = dt.date.today().isoformat()
+        if self._last_learn_date == today:
+            return
+        self._last_learn_date = today
+        try:
+            params = self._learner.learn_and_save(bot_filter)
+            if params.total_trades >= 5:
+                logger.info("[자동학습] %s", params.summary().replace("\n", " | "))
+        except Exception as e:
+            logger.debug("[자동학습] 실패: %s", e)
 
     # ── 쿨다운 ──
 

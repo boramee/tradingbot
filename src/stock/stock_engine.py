@@ -413,6 +413,9 @@ class StockEngine(BaseTradingEngine):
     # ── 메인 사이클 ──
 
     def run_once(self):
+        # 하루 1회 자동 학습 (CSV → JSON)
+        self.auto_learn_if_needed("stock_trader")
+
         mode = self.get_trading_mode()
         if mode == "closed":
             return
@@ -515,6 +518,21 @@ class StockEngine(BaseTradingEngine):
                 logger.debug("[매수 차단] %s", reason)
                 return
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
+
+            # v2: 학습 데이터 기반 신뢰도 보정
+            self._last_df = df  # 학습 보정에 현재 지표 필요
+            learned_mod = self.get_learned_confidence_modifier()
+            if learned_mod != 0:
+                sig = TradeSignal(
+                    sig.signal,
+                    min(1.0, max(0, sig.confidence + learned_mod)),
+                    sig.reason + " | 학습보정%+.2f" % learned_mod,
+                    sig.price,
+                )
+                if not sig.is_actionable:
+                    logger.debug("[학습필터] 신뢰도 부족 (보정: %+.2f)", learned_mod)
+                    return
+
             if self._buy(sig.reason, current_atr=atr, confidence=sig.confidence):
                 self._last_buy_time = now
                 self._last_buy_price = price
