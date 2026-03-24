@@ -64,7 +64,12 @@ class KISClient:
                 timeout=10,
             )
             data = resp.json()
-            self._token = data.get("access_token", "")
+            token = data.get("access_token", "")
+            if not token:
+                error_msg = data.get("msg1", data.get("message", str(data)))
+                logger.error("[KIS] 토큰 발급 실패 — 응답: %s", error_msg)
+                return
+            self._token = token
             expires_in = int(data.get("expires_in", 86400))
             self._token_expires = time.time() + expires_in - 600
             logger.info("[KIS] 토큰 발급 완료 (유효: %d초)", expires_in)
