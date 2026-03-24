@@ -1,14 +1,17 @@
-"""한국 주식 자동매매 엔진 v3
+"""한국 주식 자동매매 엔진 v4
 
-v2 대비 개선:
-  1. 시초가 갭 대응: 시가 vs 전일종가 비교 → 갭상승이면 눌림목 대기
-  2. VI 감지: 상한가 근처(+25%~+29%) 진입 금지
-  3. 스캐너 흐름 수정: 전략 분석 전에 스캐너 실행
-  4. 지정가 주문 + 미체결 정정
-  5. 섹터 평균 등락률 기반 진입
-  6. 당일 손실 시 14:30 강제 청산 (손실 확대 방지)
-  7. CSV 거래 기록 + Kill Switch
-  8. 수수료 반영 수익률 계산
+v3 → v4 변경점:
+  - BaseTradingEngine 상속: 코인과 동일한 수익 관리 로직 공유
+  - ATR 기반 동적 분할익절 (3단계: 30%+30%+트레일링)
+  - ADX 적응형 트레일링 스톱 (추세 강도별 배수 조절)
+  - 분할익절 후 보호적 스톱 (손익분기 → 이익보장)
+  - 승률 기반 적응형 포지션 사이징
+  - 수익/손실 구분 재진입 쿨다운
+
+v3 유지:
+  - 시초가 갭/VI/수급/코스피 필터 (주식 고유)
+  - 장마감 시간 관리 (주식 고유)
+  - 섹터 스캐너 (주식 고유)
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from src.strategies.fear_greed import FearGreedStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger
 from src.utils.daily_report import DailyReport
+from src.trader.base_engine import BaseTradingEngine
 from .kis_client import KISClient
 from .scanner import StockScanner
 from src.intelligence.market_sentiment import MarketSentiment
@@ -64,7 +68,8 @@ class StockPosition:
     quantity: int = 0
     highest_price: int = 0
     entry_atr: float = 0
-    partial_sold: bool = False
+    partial_sold: bool = False   # 호환용
+    partial_stage: int = 0       # v4: 다단계 분할매도 (0=미매도, 1=1차, 2=2차)
     entry_time: float = 0
 
     @property
@@ -87,8 +92,8 @@ class StockTradeLog:
     pnl_pct: float = 0.0
 
 
-class StockEngine:
-    """한국 주식 자동매매 v3"""
+class StockEngine(BaseTradingEngine):
+    """한국 주식 자동매매 v4 (BaseTradingEngine 상속)"""
 
     def __init__(
         self,
@@ -109,16 +114,20 @@ class StockEngine:
         telegram_token: str = "",
         telegram_chat_id: str = "",
     ):
+        # 공통 매매 로직 초기화 (손절/익절/트레일링/승률)
+        super().__init__(
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            trailing_pct=trailing_pct,
+            atr_stop_multiplier=atr_stop_multiplier,
+            fee_rate=STOCK_FEE,
+        )
+
         self.stock_code = stock_code
         self.auto_scan = auto_scan
         self.invest_ratio = invest_ratio
         self.max_invest_krw = max_invest_krw
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
-        self.trailing_pct = trailing_pct
-        self.atr_stop_multiplier = atr_stop_multiplier
-        self.fee_rate = STOCK_FEE
-        self.round_trip_fee_pct = STOCK_FEE * 2 * 100
+        self._stock_name = ""
 
         self.kis = KISClient(app_key, app_secret, account_no, account_prod, is_virtual)
         self.indicators = TechnicalIndicators()
@@ -134,19 +143,7 @@ class StockEngine:
         self.trade_logs: List[StockTradeLog] = []
         self.running = False
 
-        self._daily_trades = 0
-        self._max_daily_trades = 10
-        self._consecutive_losses = 0
-        self._cooldown_until: float = 0
-        self._last_buy_time: float = 0
-        self._last_sell_time: float = 0
-        self._last_stop_time: float = 0
-        self._min_buy_interval = 300       # 매수 후 5분 대기
-        self._min_rebuy_interval = 600     # 매도 후 10분 대기
-        self._stop_lockout = 900           # 손절 후 15분 금지
-        self._stock_name = ""
-
-        # 수급/지수 캐시
+        # 주식 고유: 수급/지수 캐시
         self._supply_cache = None
         self._supply_cache_time: float = 0
         self._index_cache = None
@@ -182,13 +179,10 @@ class StockEngine:
             return "normal"
         return "closing"
 
-    # ── 수익률 계산 (수수료 포함) ──
+    # ── 수익률 계산 (공통 로직 위임) ──
 
     def _calc_pnl(self, sell_price: int) -> float:
-        if self.position.avg_price <= 0:
-            return 0.0
-        gross = (sell_price - self.position.avg_price) / self.position.avg_price * 100
-        return gross - self.round_trip_fee_pct
+        return self.calc_pnl(self.position.avg_price, sell_price)
 
     # ── 시장 환경 필터 ──
 
@@ -262,13 +256,15 @@ class StockEngine:
 
     # ── 매매 실행 ──
 
-    def _buy(self, reason: str, current_atr: float = 0) -> bool:
+    def _buy(self, reason: str, current_atr: float = 0, confidence: float = 0.5) -> bool:
         balance = self.kis.get_balance()
         if not balance:
             return False
 
         cash = balance["cash"]
-        invest = min(int(cash * self.invest_ratio), self.max_invest_krw)
+        # v4: 신뢰도 × 승률 기반 투자금 조절 (공통 로직)
+        size_mult = self.get_confidence_multiplier(confidence)
+        invest = min(int(cash * self.invest_ratio * size_mult), self.max_invest_krw)
         price = self._get_price()
         if price <= 0:
             return False
@@ -319,7 +315,8 @@ class StockEngine:
 
         qty = holding["quantity"]
         if partial:
-            qty = max(1, qty // 2)
+            # v4: 30% 분할매도 (최소 1주)
+            qty = max(1, int(qty * 0.3))
 
         price = self._get_price()
         pnl_pct = self._calc_pnl(price)
@@ -348,48 +345,36 @@ class StockEngine:
                 self.position.partial_sold = True
             else:
                 self.kill_switch.record_trade(pnl_amount)
-                if pnl_pct < 0:
-                    self._consecutive_losses += 1
-                    if self._consecutive_losses >= 3:
-                        self._cooldown_until = time.time() + 900
-                        self.telegram.send(
-                            "<b>⏸ 쿨다운</b>\n%d연속 손실 → 15분 대기" % self._consecutive_losses)
-                else:
-                    self._consecutive_losses = 0
+                # v4: 공통 승률 추적 + 쿨다운 로직
+                self.record_trade_result(pnl_pct)
+                if self._consecutive_losses >= self._max_consecutive_losses:
+                    self.telegram.send(
+                        "<b>⏸ 쿨다운</b>\n%d연속 손실 → %d분 대기"
+                        % (self._consecutive_losses, self._cooldown_minutes))
                 self.position = StockPosition(code=self.stock_code)
             return True
         return False
 
-    # ── 손절/익절 ──
+    # ── 손절/익절 (v4: 공통 로직 위임) ──
 
     def _check_stop_loss(self, price: int) -> bool:
-        if self.position.avg_price <= 0:
-            return False
-        if self.position.entry_atr > 0:
-            stop = self.position.avg_price - self.position.entry_atr * self.atr_stop_multiplier
-            return price <= stop
-        pnl = self._calc_pnl(price)
-        return pnl <= -self.stop_loss_pct
+        return self.check_stop_loss(
+            self.position.avg_price, price,
+            self.position.entry_atr, self.position.partial_stage)
 
     def _check_trailing(self, price: int) -> bool:
-        if self.position.avg_price <= 0 or self.position.highest_price <= 0:
-            return False
-        pnl = self._calc_pnl(price)
-        if pnl < self.take_profit_pct:
-            return False
-        drop = (self.position.highest_price - price) / self.position.highest_price * 100
-        return drop >= self.trailing_pct
+        return self.check_trailing_stop(
+            self.position.avg_price, price,
+            self.position.highest_price, self.position.entry_atr,
+            self.position.partial_stage)
 
     # ── 매수 전 필터 ──
 
     def _pre_buy_checks(self, now: float, df=None, price: int = 0) -> tuple:
         """매수 전 모든 필터. (통과여부, 사유) 반환."""
-        if now - self._last_buy_time < self._min_buy_interval:
-            return False, "매수 간격 제한"
-        if now - self._last_sell_time < self._min_rebuy_interval:
-            return False, "재매수 대기"
-        if now - self._last_stop_time < self._stop_lockout:
-            return False, "손절 후 대기"
+        # v4: 공통 쿨다운 로직 (수익/손실 구분 재진입)
+        if self.check_rebuy_cooldown(now):
+            return False, "쿨다운 대기"
         if self.kill_switch.is_killed():
             return False, "Kill Switch 발동"
         if self._daily_trades >= self._max_daily_trades:
@@ -456,28 +441,43 @@ class StockEngine:
         # ── 보유 중: 손절/익절 (시간대 무관) ──
         if is_holding:
             self.position.update_highest(price)
+            self._last_df = df  # v4: ADX 적응형 트레일링용
             pnl_pct = self._calc_pnl(price)
+            label = "%s %s" % (self.stock_code, self._stock_name)
 
-            # 손절
+            # 손절 (v4: 보호적 스톱 포함)
             if self._check_stop_loss(price):
-                self.telegram.notify_stop_loss(
-                    "%s %s" % (self.stock_code, self._stock_name), price, abs(pnl_pct))
-                self._sell("손절 (%+.1f%%)" % pnl_pct)
-                self._last_stop_time = time.time()
+                detail = self.get_stop_loss_detail(
+                    self.position.avg_price, price,
+                    self.position.entry_atr, self.position.partial_stage)
+                self.telegram.notify_stop_loss(label, price, abs(pnl_pct))
+                self._sell(detail)
+                self._last_stop_loss_time = time.time()
+                self._last_sell_time = time.time()
                 return
 
-            # 분할매도
-            partial_trigger = self.take_profit_pct * 0.6
-            if not self.position.partial_sold and pnl_pct >= partial_trigger:
-                self._sell("분할익절 (%+.1f%%)" % pnl_pct, partial=True)
+            # v4: 3단계 분할익절 (ATR 동적)
+            stage = self.position.partial_stage
+            tp1, tp2 = self.get_partial_triggers(self.position.avg_price, self.position.entry_atr)
+
+            if stage == 0 and pnl_pct >= tp1:
+                self._sell("1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp1), partial=True)
+                self.position.partial_stage = 1
                 return
 
-            # 트레일링
+            if stage == 1 and pnl_pct >= tp2:
+                self._sell("2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp2), partial=True)
+                self.position.partial_stage = 2
+                return
+
+            # v4: ADX 적응형 트레일링
             if self._check_trailing(price):
-                drop = (self.position.highest_price - price) / self.position.highest_price * 100
-                self.telegram.notify_take_profit(
-                    "%s %s" % (self.stock_code, self._stock_name), price, pnl_pct)
-                self._sell("트레일링 (최고:%s, 하락:%.1f%%)" % ("{:,}".format(self.position.highest_price), drop))
+                detail = self.get_trailing_detail(
+                    self.position.avg_price, price,
+                    self.position.highest_price, self.position.entry_atr)
+                self.telegram.notify_take_profit(label, price, pnl_pct)
+                self._sell(detail)
+                self._last_sell_time = time.time()
                 return
 
             # 14:30: 수익이면 청산, 손실이면 손절폭 내 유지
@@ -494,9 +494,9 @@ class StockEngine:
         if mode == "closing":
             return
 
-        # ── 쿨다운 ──
+        # ── 쿨다운 (v4: 공통 로직) ──
         now = time.time()
-        if now < self._cooldown_until:
+        if self.is_in_cooldown():
             return
 
         # ── 자동 스캔 모드 (전략 분석 전에 실행) ──
@@ -515,10 +515,15 @@ class StockEngine:
                 logger.debug("[매수 차단] %s", reason)
                 return
             atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else 0
-            self._buy(sig.reason, current_atr=atr)
+            if self._buy(sig.reason, current_atr=atr, confidence=sig.confidence):
+                self._last_buy_time = now
+                self._last_buy_price = price
 
         elif sig.signal == Signal.SELL and is_holding:
-            self._sell(sig.reason)
+            pnl_before = self._calc_pnl(price)
+            if self._sell(sig.reason):
+                self._last_sell_time = now
+                self._last_sell_profitable = pnl_before > 0
 
     def _run_auto_scan(self, now: float, df, price: int):
         """자동 스캔: 스캐너 → 필터 → 전략 → 매수"""
