@@ -49,6 +49,7 @@ class Position:
     entry_atr: float = 0.0
     partial_sold: bool = False   # 호환용 (1단계 완료 여부)
     partial_stage: int = 0       # 다단계 분할매도 단계 (0=미매도, 1=1차, 2=2차)
+    breakeven_stop: bool = False # v4: 분할익절 후 손익분기 스톱 활성
 
     @property
     def is_holding(self) -> bool:
@@ -146,9 +147,16 @@ class TraderEngine:
         self._last_sell_time: float = 0      # 마지막 매도 시각
         self._min_buy_interval = 180          # v3: 5분 → 3분 (기회 놓침 방지)
         self._min_rebuy_interval = 300        # v3: 10분 → 5분 (재진입 기회 확보)
+        self._min_rebuy_after_profit = 120    # v4: 수익 매도 후 2분만 대기 (추세 재진입)
         self._last_stop_loss_time: float = 0
         self._stop_loss_lockout = 600         # v3: 15분 → 10분 (손절 후 재진입 유연화)
         self._last_buy_price: float = 0       # 직전 매수가 기록
+        self._last_sell_profitable: bool = False  # v4: 직전 매도 수익 여부
+        self._last_df: Optional[pd.DataFrame] = None  # v4: 현재 사이클 df 캐시
+
+        # v4: 승률 기반 적응형 포지션 사이징
+        self._recent_results: List[float] = []  # 최근 20건 수익률
+        self._win_rate_window = 20
 
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
@@ -189,11 +197,28 @@ class TraderEngine:
 
     # ── 매매 실행 ──
 
+    def _get_win_rate_multiplier(self) -> float:
+        """v4: 최근 승률 기반 포지션 크기 보정
+        승률 > 60% → 1.3배 (연승 활용)
+        승률 40~60% → 1.0배 (기본)
+        승률 < 40% → 0.6배 (연패 방어)
+        """
+        if len(self._recent_results) < 5:
+            return 1.0
+        wins = sum(1 for r in self._recent_results if r > 0)
+        rate = wins / len(self._recent_results)
+        if rate > 0.6:
+            return 1.3
+        if rate < 0.4:
+            return 0.6
+        return 1.0
+
     def _buy(self, reason: str, current_atr: float = 0.0, confidence: float = 0.5) -> bool:
         krw = self._get_krw_balance()
-        # v3: 신뢰도 기반 투자금 조절 (0.5→기본, 0.8→1.4배, 1.0→1.8배)
+        # v4: 신뢰도 × 승률 기반 투자금 조절
         conf_multiplier = 0.6 + confidence * 1.2
-        amount = min(krw * self.invest_ratio * conf_multiplier, self.max_invest_krw)
+        wr_multiplier = self._get_win_rate_multiplier()
+        amount = min(krw * self.invest_ratio * conf_multiplier * wr_multiplier, self.max_invest_krw)
         if amount < 5000:
             logger.info("[매수 불가] 잔고 부족: %.0f원 (투자금: %.0f원 < 최소 5,000원)", krw, amount)
             self._alert_once(
@@ -303,7 +328,14 @@ class TraderEngine:
         return True
 
     def _track_loss(self, pnl_pct: float):
-        """연속 손실 추적 및 쿨다운 발동"""
+        """연속 손실 추적 및 쿨다운 발동 + v4: 승률 추적"""
+        # v4: 최근 거래 결과 기록 (승률 계산용)
+        self._recent_results.append(pnl_pct)
+        if len(self._recent_results) > self._win_rate_window:
+            self._recent_results.pop(0)
+
+        self._last_sell_profitable = pnl_pct > 0
+
         if pnl_pct < 0:
             self._consecutive_losses += 1
             if self._consecutive_losses >= self._max_consecutive_losses:
@@ -337,9 +369,22 @@ class TraderEngine:
     # ── 손절/익절 ──
 
     def _check_stop_loss(self, current_price: float) -> bool:
-        """ATR 기반 동적 손절 (수수료 포함). ATR 없으면 고정 %로 폴백."""
+        """ATR 기반 동적 손절 (수수료 포함). ATR 없으면 고정 %로 폴백.
+        v4: 분할익절 후 손익분기 스톱 — 수익 확보 후 원금 보호.
+        """
         if self.position.avg_price <= 0:
             return False
+
+        # v4: 1차 익절 이후 → 손절선을 진입가(손익분기)로 올림
+        if self.position.partial_stage >= 1:
+            # stage 1: 손익분기 (진입가 + 수수료)
+            # stage 2: 약간의 이익 보장 (진입가 + ATR×0.5)
+            if self.position.partial_stage >= 2 and self.position.entry_atr > 0:
+                protect_price = self.position.avg_price + self.position.entry_atr * 0.5
+            else:
+                protect_price = self.position.avg_price * (1 + self.fee_rate * 2)
+            if current_price <= protect_price:
+                return True
 
         if self.position.entry_atr > 0:
             stop_distance = self.position.entry_atr * self.atr_stop_multiplier
@@ -349,32 +394,68 @@ class TraderEngine:
         net_pnl = self._calc_pnl(current_price)
         return net_pnl <= -self.stop_loss_pct
 
+    def _get_trail_multiplier(self) -> float:
+        """v4: ADX 기반 트레일링 배수 조절
+        강한 추세 → 넓게 (수익 극대화), 약한 추세 → 좁게 (수익 보호)
+        """
+        if self._last_df is None:
+            return 1.5
+        adx = None
+        if "adx" in self._last_df.columns:
+            v = self._last_df["adx"].iloc[-1]
+            if pd.notna(v):
+                adx = float(v)
+        if adx is None:
+            return 1.5
+        if adx >= 30:
+            return 2.5  # 강한 추세: 넓게 → 수익 극대화
+        if adx >= 20:
+            return 1.5  # 보통
+        return 1.0      # 약한 추세: 좁게 → 수익 보호
+
     def _check_trailing_stop(self, current_price: float) -> bool:
-        """ATR 기반 트레일링 스톱: 최고점에서 ATR×1.5 하락 시 익절.
-        ATR 없으면 고정 % 폴백.
-        수익이 take_profit_pct 이상일 때만 활성화.
+        """v4: ADX 적응형 트레일링 스톱.
+        강한 추세(ADX>30) → ATR×2.5 (넓게, 추세 탑승)
+        보통(ADX 20~30) → ATR×1.5
+        횡보(ADX<20) → ATR×1.0 (좁게, 수익 보호)
         """
         if self.position.avg_price <= 0 or self.position.highest_price <= 0:
             return False
 
         net_pnl = self._calc_pnl(current_price)
-        # 2단계 이상 분할매도 후에는 즉시 트레일링 활성화
         min_pnl = self.take_profit_pct * 0.5 if self.position.partial_stage >= 2 else self.take_profit_pct
         if net_pnl < min_pnl:
             return False
 
-        # ATR 기반: 최고점에서 ATR×1.5 하락
+        # v4: ADX 적응형 트레일링 배수
+        trail_mult = self._get_trail_multiplier()
+
+        # v4: 거래량 클라이맥스 감지 → 트레일링 즉시 타이트닝
+        if self._last_df is not None and "vol_ratio" in self._last_df.columns:
+            vr = self._last_df["vol_ratio"].iloc[-1]
+            if pd.notna(vr) and float(vr) > 3.0:
+                trail_mult = min(trail_mult, 0.8)  # 급등 거래량 → 반전 임박
+
         if self.position.entry_atr > 0:
-            trail_distance = self.position.entry_atr * 1.5
+            trail_distance = self.position.entry_atr * trail_mult
             trail_price = self.position.highest_price - trail_distance
             return current_price <= trail_price
 
-        # 폴백: 고정 %
+        # 폴백: 고정 % (ADX 보정)
+        adjusted_trailing = self.trailing_pct * (trail_mult / 1.5)
         drop_from_high = (self.position.highest_price - current_price) / self.position.highest_price * 100
-        return drop_from_high >= self.trailing_pct
+        return drop_from_high >= adjusted_trailing
 
     def _get_stop_loss_detail(self, current_price: float) -> str:
         """손절 상세 사유"""
+        # v4: 보호적 손절 (분할익절 후 손익분기 보호)
+        if self.position.partial_stage >= 1:
+            pnl = self._calc_pnl(current_price)
+            stage = self.position.partial_stage
+            if stage >= 2 and self.position.entry_atr > 0:
+                return "보호스톱 %d차익절후 (진입가+ATR×0.5, PnL:%+.1f%%)" % (stage, pnl)
+            return "손익분기 보호스톱 %d차익절후 (PnL:%+.1f%%)" % (stage, pnl)
+
         if self.position.entry_atr > 0:
             stop_dist = self.position.entry_atr * self.atr_stop_multiplier
             stop_price = self.position.avg_price - stop_dist
@@ -388,11 +469,12 @@ class TraderEngine:
         """트레일링 스톱 상세 사유"""
         gain = (current_price - self.position.avg_price) / self.position.avg_price * 100
         drop = (self.position.highest_price - current_price) / self.position.highest_price * 100
+        trail_mult = self._get_trail_multiplier()
         if self.position.entry_atr > 0:
-            trail_dist = self.position.entry_atr * 1.5
-            return "ATR트레일링 익절 (수익:+%.1f%%, 최고:%s, ATR하락:%s)" % (
+            trail_dist = self.position.entry_atr * trail_mult
+            return "ATR트레일링 익절 (수익:+%.1f%%, 최고:%s, ATR×%.1f=%s)" % (
                 gain, "{:,.0f}".format(self.position.highest_price),
-                "{:,.0f}".format(trail_dist))
+                trail_mult, "{:,.0f}".format(trail_dist))
         return "트레일링 익절 (수익:+%.1f%%, 최고점:%s, 하락:%.1f%%)" % (
             gain, "{:,.0f}".format(self.position.highest_price), drop)
 
@@ -425,6 +507,7 @@ class TraderEngine:
         self.api_guard.on_success()
 
         df = self.indicators.add_all(df)
+        self._last_df = df  # v4: ADX 참조용 캐시
         self._last_indicators = self._get_current_indicators(df)
         current_price = self._get_current_price()
 
@@ -457,21 +540,33 @@ class TraderEngine:
                 self._last_sell_time = time.time()  # 버그수정: 손절도 매도 시간 기록
                 return
 
-            # 다단계 분할익절: 1차(60%) 30%, 2차(100%) 30%, 나머지 트레일링
+            # v4: ATR 기반 동적 분할익절 (변동성에 적응)
             stage = self.position.partial_stage
             tp = self.take_profit_pct
+            atr = self.position.entry_atr
 
-            if stage == 0 and gain_pct >= tp * 0.6:
+            if atr > 0 and self.position.avg_price > 0:
+                # ATR 기반: 1차=ATR×1.5, 2차=ATR×3.0 (가격 기준)
+                atr_tp1 = (atr * 1.5) / self.position.avg_price * 100  # ATR를 % 수익률로 변환
+                atr_tp2 = (atr * 3.0) / self.position.avg_price * 100
+                # 고정 %와 ATR 중 더 작은 값 사용 (보수적)
+                tp1_trigger = min(tp * 0.6, atr_tp1)
+                tp2_trigger = min(tp, atr_tp2)
+            else:
+                tp1_trigger = tp * 0.6
+                tp2_trigger = tp
+
+            if stage == 0 and gain_pct >= tp1_trigger:
                 self._sell(
-                    "1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, tp * 0.6),
+                    "1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, tp1_trigger),
                     partial=True, partial_pct=30.0,
                 )
                 self.position.partial_stage = 1
                 return
 
-            if stage == 1 and gain_pct >= tp:
+            if stage == 1 and gain_pct >= tp2_trigger:
                 self._sell(
-                    "2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, tp),
+                    "2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (gain_pct, tp2_trigger),
                     partial=True, partial_pct=30.0,
                 )
                 self.position.partial_stage = 2
@@ -508,8 +603,9 @@ class TraderEngine:
             if now - self._last_buy_time < self._min_buy_interval:
                 return
 
-            # 매도 후 재매수까지 10분 대기
-            if now - self._last_sell_time < self._min_rebuy_interval:
+            # v4: 수익 매도 후 재진입은 빠르게, 손실 매도 후는 느리게
+            rebuy_wait = self._min_rebuy_after_profit if self._last_sell_profitable else self._min_rebuy_interval
+            if now - self._last_sell_time < rebuy_wait:
                 return
 
             # 손절 후 15분 재진입 금지
@@ -550,8 +646,10 @@ class TraderEngine:
                 self._last_buy_price = current_price
 
         elif sig.signal == Signal.SELL and is_holding:
+            pnl_before = self._calc_pnl(current_price)
             if self._sell(sig.reason):
                 self._last_sell_time = now
+                self._last_sell_profitable = pnl_before > 0
 
     def _update_higher_timeframe(self):
         """상위 타임프레임 추세를 주기적으로 갱신"""
