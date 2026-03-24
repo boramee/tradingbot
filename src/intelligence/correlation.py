@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from typing import Dict, Optional
 
 import pyupbit
@@ -26,9 +27,10 @@ class CoinCorrelation:
     """BTC를 선행 지표로 사용하여 알트코인 매매 판단 보조"""
 
     CACHE_TTL = 30  # 30초 캐시
+    _MAX_HISTORY = 180  # 최대 저장 개수 (10초 간격 × 30분 = 180)
 
     def __init__(self):
-        self._btc_prices: list = []
+        self._btc_prices: deque = deque(maxlen=self._MAX_HISTORY)
         self._last_update: float = 0
         self._btc_trend: str = "neutral"  # up, down, neutral
 
@@ -41,10 +43,7 @@ class CoinCorrelation:
         try:
             price = pyupbit.get_current_price("KRW-BTC")
             if price and price > 0:
-                self._btc_prices.append({"price": float(price), "time": now})
-                # 최근 30분만 유지
-                cutoff = now - 1800
-                self._btc_prices = [p for p in self._btc_prices if p["time"] > cutoff]
+                self._btc_prices.append((float(price), now))
                 self._btc_trend = self._calc_trend()
                 self._last_update = now
         except Exception:
@@ -55,14 +54,23 @@ class CoinCorrelation:
         if len(self._btc_prices) < 3:
             return "neutral"
 
-        recent = self._btc_prices[-1]["price"]
-        past_5m = [p for p in self._btc_prices if p["time"] > time.time() - 300]
-        past_15m = [p for p in self._btc_prices if p["time"] > time.time() - 900]
+        now = time.time()
+        recent = self._btc_prices[-1][0]
+        cutoff_5m = now - 300
 
-        if not past_5m:
+        # 최근 5분 데이터만 필터 (deque는 시간순 → 뒤에서 검색)
+        total = 0.0
+        count = 0
+        for price, ts in reversed(self._btc_prices):
+            if ts < cutoff_5m:
+                break
+            total += price
+            count += 1
+
+        if count == 0:
             return "neutral"
 
-        avg_5m = sum(p["price"] for p in past_5m) / len(past_5m)
+        avg_5m = total / count
         change_5m = (recent - avg_5m) / avg_5m * 100
 
         if change_5m > 0.3:
@@ -103,8 +111,10 @@ class CoinCorrelation:
         """BTC 5분 변화율"""
         if len(self._btc_prices) < 2:
             return 0.0
-        recent = self._btc_prices[-1]["price"]
-        past = [p for p in self._btc_prices if p["time"] > time.time() - 300]
-        if not past:
-            return 0.0
-        return (recent - past[0]["price"]) / past[0]["price"] * 100
+        recent = self._btc_prices[-1][0]
+        cutoff = time.time() - 300
+        # deque에서 5분 전 가격 찾기 (시간순 정렬)
+        for price, ts in self._btc_prices:
+            if ts >= cutoff:
+                return (recent - price) / price * 100
+        return 0.0

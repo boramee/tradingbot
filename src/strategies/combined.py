@@ -46,6 +46,7 @@ class CombinedStrategy(BaseStrategy):
         self._adv = AdvancedIndicators()
         self._higher_tf_trend: Optional[str] = None
         self._htf_ticker: str = ""
+        self._htf_indicators: Optional["TechnicalIndicators"] = None
 
     @property
     def name(self) -> str:
@@ -54,12 +55,13 @@ class CombinedStrategy(BaseStrategy):
     def set_higher_timeframe(self, ticker: str, htf_interval: str = "minute60"):
         """상위 타임프레임 추세 캐시 (엔진에서 주기적 호출)"""
         try:
-            from src.indicators.technical import TechnicalIndicators
+            if self._htf_indicators is None:
+                from src.indicators.technical import TechnicalIndicators
+                self._htf_indicators = TechnicalIndicators()
             df = pyupbit.get_ohlcv(ticker, interval=htf_interval, count=100)
             if df is not None and not df.empty:
                 df.columns = ["open", "high", "low", "close", "volume", "value"]
-                ti = TechnicalIndicators()
-                df = ti.add_all(df)
+                df = self._htf_indicators.add_all(df)
                 self._higher_tf_trend = self._adv.classify_market(df)
                 self._htf_ticker = ticker
                 logger.debug("상위TF 추세: %s (%s)", self._higher_tf_trend, htf_interval)

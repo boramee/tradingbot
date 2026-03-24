@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -120,6 +121,7 @@ class TraderEngine:
         self.position = Position(ticker=ticker)
         self.trade_logs: List[TradeLog] = []
         self.running = False
+        self._stop_event = threading.Event()
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
         self.kill_switch = KillSwitch(max_daily_loss_pct=3.0)
         self.trade_logger = TradeLogger()
@@ -207,38 +209,35 @@ class TraderEngine:
             return False
 
         price = self._get_current_price()
+
         if self._upbit:
             result = self._upbit.buy_market_order(self.ticker, amount)
-            if result and "error" not in result:
-                self.position.avg_price = price
-                self.position.volume = amount / price
-                self.position.entry_time = time.time()
-                self.position.highest_price = price
-                self.position.entry_atr = current_atr
-                self._daily_trades += 1
-                self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
-                atr_info = " (ATR:%.0f)" % current_atr if current_atr > 0 else ""
-                logger.info("[매수] %s | %.0f원 투자%s | %s", self.ticker, amount, atr_info, reason)
-                self.telegram.notify_buy(self.ticker, price, amount, reason)
-                self.trade_logger.log(
-                    bot="coin_trader", side="BUY", symbol=self.ticker, exchange="upbit",
-                    price=price, quantity=amount / price, amount=amount,
-                    fee=amount * self.fee_rate, reason=reason,
-                    indicators=self._last_indicators)
-                return True
-            logger.error("[매수 실패] %s", result)
+            if not result or "error" in result:
+                logger.error("[매수 실패] %s", result)
+                return False
+            log_reason = reason
         else:
-            logger.info("[시뮬] 매수: %.0f원 | 가격: %.0f | %s", amount, price, reason)
-            self.position.avg_price = price
-            self.position.volume = amount / price
-            self.position.entry_time = time.time()
-            self.position.highest_price = price
-            self.position.entry_atr = current_atr
-            self._daily_trades += 1
-            self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
-            self.telegram.notify_buy(self.ticker, price, amount, "[시뮬] " + reason)
-            return True
-        return False
+            log_reason = "[시뮬] " + reason
+
+        # 공통 포지션 업데이트
+        self.position.avg_price = price
+        self.position.volume = amount / price
+        self.position.entry_time = time.time()
+        self.position.highest_price = price
+        self.position.entry_atr = current_atr
+        self._daily_trades += 1
+        self.trade_logs.append(TradeLog(time.time(), "BUY", price, amount, reason))
+
+        atr_info = " (ATR:%.0f)" % current_atr if current_atr > 0 else ""
+        tag = "[매수]" if self._upbit else "[시뮬] 매수:"
+        logger.info("%s %s | %.0f원 투자%s | %s", tag, self.ticker, amount, atr_info, reason)
+        self.telegram.notify_buy(self.ticker, price, amount, log_reason)
+        self.trade_logger.log(
+            bot="coin_trader", side="BUY", symbol=self.ticker, exchange="upbit",
+            price=price, quantity=amount / price, amount=amount,
+            fee=amount * self.fee_rate, reason=reason,
+            indicators=self._last_indicators)
+        return True
 
     def _calc_pnl(self, sell_price: float) -> float:
         """수수료 포함 실수익률 계산"""
@@ -399,17 +398,16 @@ class TraderEngine:
 
     # ── 메인 사이클 ──
 
+    _INDICATOR_KEYS = ("rsi", "macd_hist", "adx", "atr", "vol_ratio")
+
     def _get_current_indicators(self, df) -> Dict:
         """현재 지표값 추출 (CSV 기록용)"""
         if df is None or df.empty:
             return {}
         last = df.iloc[-1]
         return {
-            "rsi": float(last.get("rsi", 0)) if pd.notna(last.get("rsi")) else 0,
-            "macd_hist": float(last.get("macd_hist", 0)) if pd.notna(last.get("macd_hist")) else 0,
-            "adx": float(last.get("adx", 0)) if pd.notna(last.get("adx")) else 0,
-            "atr": float(last.get("atr", 0)) if pd.notna(last.get("atr")) else 0,
-            "vol_ratio": float(last.get("vol_ratio", 0)) if pd.notna(last.get("vol_ratio")) else 0,
+            k: float(v) if pd.notna(v := last.get(k)) else 0
+            for k in self._INDICATOR_KEYS
         }
 
     def run_once(self):
@@ -600,10 +598,12 @@ class TraderEngine:
     def start(self, poll_sec: int = 60):
         """무한 루프 실행"""
         self.running = True
+        self._stop_event.clear()
 
         def _stop(signum, frame):
             logger.info("종료 시그널 수신...")
             self.running = False
+            self._stop_event.set()
 
         signal.signal(signal.SIGINT, _stop)
         signal.signal(signal.SIGTERM, _stop)
@@ -635,10 +635,7 @@ class TraderEngine:
                 logger.error("사이클 오류: %s", e, exc_info=True)
 
             if self.running:
-                for _ in range(poll_sec):
-                    if not self.running:
-                        break
-                    time.sleep(1)
+                self._stop_event.wait(timeout=poll_sec)
 
         logger.info("봇 종료 완료")
 
