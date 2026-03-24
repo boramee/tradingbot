@@ -92,6 +92,47 @@ status() {
 
 log() { echo "Ctrl+C로 나가기"; echo "---"; tail -f "$LOG"; }
 
+config() {
+    TRADE_MODE="모의투자"
+    [ "$REAL" = "1" ] && TRADE_MODE="🔴 실전"
+
+    if [ "$SCAN" = "1" ]; then
+        SCAN_LABEL="자동 스캔"
+    else
+        SCAN_LABEL="고정: $CODE"
+    fi
+
+    echo "============================="
+    echo "  주식봇 현재 설정"
+    echo "============================="
+    echo "  종목: $SCAN_LABEL"
+    echo "  전략: $STRATEGY"
+    echo "  모드: $TRADE_MODE"
+    echo "  투자비율: ${INVEST_RATIO} (${MAX_INVEST}원 제한)"
+    echo ""
+    echo "  KIS_APP_KEY: $([ -n "$KIS_APP_KEY" ] && echo '설정됨' || echo '❌ 미설정')"
+    echo "  KIS_ACCOUNT_NO: $([ -n "$KIS_ACCOUNT_NO" ] && echo "$KIS_ACCOUNT_NO" || echo '❌ 미설정')"
+    echo "  TELEGRAM: $([ -n "$TELEGRAM_TOKEN" ] && echo '설정됨' || echo '❌ 미설정')"
+    echo "============================="
+}
+
+check() {
+    echo "사전점검 실행 중..."
+    source "$DIR/venv/bin/activate" 2>/dev/null
+
+    VIRTUAL_FLAG="--virtual"
+    [ "$REAL" = "1" ] && VIRTUAL_FLAG=""
+
+    $VENV run_stock.py --code "$CODE" --strategy "$STRATEGY" $VIRTUAL_FLAG --preflight
+    if [ $? -eq 0 ]; then
+        echo ""
+        echo "✅ 사전점검 통과 — 시작 준비 완료"
+    else
+        echo ""
+        echo "❌ 사전점검 실패 — 위 항목을 확인하세요"
+    fi
+}
+
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 case "${1:-help}" in
@@ -100,10 +141,16 @@ case "${1:-help}" in
     restart) restart ;;
     status)  status ;;
     log)     log ;;
+    config)  config ;;
+    check)   check ;;
     *)
-        echo "사용법: ./bot_stock.sh {start|stop|restart|status|log}"
+        echo "사용법: ./bot_stock.sh {start|stop|restart|status|log|config|check}"
         echo ""
-        echo "  ./bot_stock.sh start                  # 자동 스캔 (기본)"
+        echo "  ./bot_stock.sh config                    # 현재 설정 확인"
+        echo "  ./bot_stock.sh check                     # 사전점검 (인증/잔고/시세)"
+        echo "  ./bot_stock.sh start                     # 자동 스캔 (모의투자)"
+        echo "  REAL=1 ./bot_stock.sh check              # 실전 모드 사전점검"
+        echo "  REAL=1 ./bot_stock.sh start              # 실전 투입"
         echo "  SCAN=0 CODE=005930 ./bot_stock.sh start  # 고정 종목"
         echo "  STRATEGY=rsi ./bot_stock.sh restart"
         ;;
