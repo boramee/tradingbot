@@ -513,6 +513,19 @@ class TraderEngine(BaseTradingEngine):
                     logger.debug("[세션필터] 비활성 세션 → 신뢰도 부족")
                     return
 
+            # v2: 학습 데이터 기반 신뢰도 보정
+            learned_mod = self.get_learned_confidence_modifier()
+            if learned_mod != 0:
+                sig = TradeSignal(
+                    sig.signal,
+                    min(1.0, max(0, sig.confidence + learned_mod)),
+                    sig.reason + " | 학습보정%+.2f" % learned_mod,
+                    sig.price,
+                )
+                if not sig.is_actionable:
+                    logger.debug("[학습필터] 신뢰도 부족 (보정: %+.2f)", learned_mod)
+                    return
+
             if self._buy(sig.reason, current_atr=atr, confidence=sig.confidence):
                 self._last_buy_time = now
                 self._last_buy_price = current_price
