@@ -167,7 +167,7 @@ class CombinedStrategy(BaseStrategy):
                 conf = min(1.0, conf + 0.1)
 
             tag = " | ".join(reasons) if reasons else "없음"
-            if conf >= 0.35:  # v2: 0.5 → v3: 0.35 (is_actionable에서 최종 판단)
+            if conf >= 0.45:  # v3.1: 0.35→0.45 (저품질 신호 걸러냄, is_actionable≥0.5 이중 필터)
                 return TradeSignal(Signal.BUY, conf,
                                    "매수%s%s: %s" % (mkt_str, htf_str, tag), price)
 
@@ -184,7 +184,7 @@ class CombinedStrategy(BaseStrategy):
                 conf = min(1.0, conf + 0.1)
 
             tag = " | ".join(reasons) if reasons else "없음"
-            if conf >= 0.35:
+            if conf >= 0.45:
                 return TradeSignal(Signal.SELL, conf,
                                    "매도%s%s: %s" % (mkt_str, htf_str, tag), price)
 

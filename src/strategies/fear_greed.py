@@ -144,19 +144,21 @@ class FearGreedStrategy(BaseStrategy):
 
     @staticmethod
     def _consecutive_direction(df: pd.DataFrame, lookback: int = 10) -> int:
-        """최근 연속 상승/하락 일수. 양수=상승, 음수=하락"""
+        """최근 연속 상승/하락 일수. 양수=상승, 음수=하락
+        버그 수정: count += d → count 별도 누적 후 방향 곱셈
+        """
         if len(df) < 2:
             return 0
         changes = df["close"].diff().iloc[-lookback:]
         count = 0
-        last_dir = None
+        direction = None
         for ch in reversed(changes.dropna()):
             d = 1 if ch > 0 else -1 if ch < 0 else 0
             if d == 0:
                 break
-            if last_dir is None:
-                last_dir = d
-            if d != last_dir:
+            if direction is None:
+                direction = d
+            if d != direction:
                 break
-            count += d
-        return count
+            count += 1
+        return count * direction if direction else 0
