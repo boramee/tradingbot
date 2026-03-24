@@ -149,10 +149,10 @@ class FearGreedStrategy(BaseStrategy):
         """
         if len(df) < 2:
             return 0
-        changes = df["close"].diff().iloc[-lookback:]
+        changes = df["close"].diff().iloc[-lookback:].dropna().values
         count = 0
         direction = None
-        for ch in reversed(changes.dropna()):
+        for ch in reversed(changes):
             d = 1 if ch > 0 else -1 if ch < 0 else 0
             if d == 0:
                 break
