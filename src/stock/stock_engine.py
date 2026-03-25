@@ -732,6 +732,14 @@ class StockEngine(BaseTradingEngine):
                 return
             else:
                 logger.info("[자동스캔] %s 매수 실패 (잔고 부족 가능)", best.name)
+                self.telegram.send(
+                    "<b>⚠️ 스캐너 매수 실패</b>\n"
+                    "종목: <code>%s %s</code>\n"
+                    "점수: %.0f점 (%+.1f%%)\n"
+                    "사유: 잔고 부족 가능\n"
+                    "신호: %s"
+                    % (best.code, self.telegram.escape(best.name),
+                       best.score, best.change_pct, scan_reason))
                 self.stock_code = old_code
 
         logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))
