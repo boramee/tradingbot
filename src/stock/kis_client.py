@@ -60,6 +60,8 @@ class KISClient:
         now = time.time()
         # 1분당 1회 제한 — 쿨다운 내에는 재시도하지 않음
         if now < self._token_retry_after:
+            remaining = int(self._token_retry_after - now)
+            logger.debug("[KIS] 토큰 쿨다운 중 (%d초 남음)", remaining)
             return
         try:
             resp = requests.post(
@@ -289,6 +291,10 @@ class KISClient:
 
     def get_volume_rank(self, market: str = "J", limit: int = 30) -> List[Dict]:
         """거래대금 상위 종목 조회 (당일 기준)"""
+        if not self._token:
+            self._ensure_token()
+            if not self._token:
+                return []
         try:
             resp = requests.get(
                 "%s/uapi/domestic-stock/v1/quotations/volume-rank" % self.base_url,
@@ -309,6 +315,12 @@ class KISClient:
                 timeout=10,
             )
             data = resp.json()
+            # API 에러 응답 체크
+            rt_cd = data.get("rt_cd", "")
+            if rt_cd != "0" and rt_cd != "":
+                logger.error("[KIS] 거래량순위 API 에러: rt_cd=%s, msg=%s",
+                             rt_cd, data.get("msg1", data.get("msg", "")))
+                return []
             items = data.get("output", [])
             results = []
             for item in items[:limit]:

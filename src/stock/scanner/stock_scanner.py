@@ -126,6 +126,10 @@ class StockScanner:
     # ── 1단계: 거래대금 상위 + 전일 대비 거래량 급증 ──
 
     def _stage1_volume_scan(self) -> List[ScanResult]:
+        if not self.kis.is_authenticated:
+            logger.debug("[스캐너 1단계] KIS 미인증 — 토큰 대기 중")
+            return []
+
         rankings = self.kis.get_volume_rank(limit=50)
 
         if not rankings:
