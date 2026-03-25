@@ -251,6 +251,12 @@ class StockScanner:
         filtered = []
 
         for cand in candidates[:25]:
+            # 하락 종목 제외 (매수 대상이 아님)
+            if cand.change_pct < 0:
+                logger.debug("[스캐너 2단계] %s %s 하락종목(%.1f%%) → 스킵",
+                             cand.code, cand.name, cand.change_pct)
+                continue
+
             score = cand.score
             reasons = list(cand.reasons)
 
