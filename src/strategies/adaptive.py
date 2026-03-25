@@ -87,8 +87,8 @@ class AdaptiveStrategy(BaseStrategy):
         if bb_upper and bb_lower and bb_mid and bb_mid > 0:
             bb_width = (bb_upper - bb_lower) / bb_mid * 100
 
-        # 고변동장: ATR 급증 또는 밴드폭 과대
-        if atr_surge or bb_width > 8:
+        # 고변동장: ATR 급증 + 밴드폭 과대 (둘 다 충족해야 차단)
+        if atr_surge and bb_width > 15:
             return "volatile"
 
         # 추세장: ADX 높고 방향 명확

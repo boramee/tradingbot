@@ -136,6 +136,11 @@ class StockScanner:
                 return r
         return None
 
+    def get_candidates(self, limit: int = 5) -> List[ScanResult]:
+        """상위 N개 후보 반환 (제외 종목 필터링)"""
+        results = self.scan()
+        return [r for r in results if r.code not in self._excluded][:limit]
+
     # ── 1단계: 거래대금 상위 + 전일 대비 거래량 급증 ──
 
     def _stage1_volume_scan(self) -> List[ScanResult]:
