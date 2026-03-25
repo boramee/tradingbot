@@ -693,7 +693,10 @@ class StockEngine(BaseTradingEngine):
                 continue
 
             scan_df = self.indicators.add_all(scan_df)
-            sig = self.strategy.analyze(scan_df)
+            try:
+                sig = self.strategy.analyze(scan_df, scanner_score=best.score)
+            except TypeError:
+                sig = self.strategy.analyze(scan_df)
 
             if sig.signal != Signal.BUY or not sig.is_actionable:
                 logger.info("[자동스캔] %s 전략 시그널 미발생 (%s) → 다음 후보", best.name, sig.reason)
