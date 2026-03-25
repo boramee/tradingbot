@@ -686,6 +686,11 @@ class StockEngine(BaseTradingEngine):
             logger.info("[자동스캔] 후보 %d/%d: %s %s (%.0f점, %+.1f%%)",
                         i + 1, len(candidates), best.code, best.name, best.score, best.change_pct)
 
+            # VI/상한가 조기 체크 (OHLCV 조회 전 — 스캐너 등락률 기반)
+            if best.change_pct >= 25:
+                logger.info("[자동스캔] %s 상한가/VI 근처 (%+.1f%%) → 스킵", best.name, best.change_pct)
+                continue
+
             # 스캔 종목의 차트 분석
             scan_df = self.kis.get_ohlcv(best.code, period="D", count=60)
             if scan_df is None or len(scan_df) < 20:

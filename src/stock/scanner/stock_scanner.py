@@ -45,6 +45,7 @@ SECTOR_MAP = {
 # 단타 기준 (스윙보다 공격적) - 장 초반에도 후보 잡히도록 완화
 MIN_TRADE_VALUE = 3_000_000_000    # 30억 이상 (장 초반 대응)
 MIN_CHANGE_PCT = 1.0               # 1.0% 이상 움직이는 종목
+MAX_CHANGE_PCT = 25.0              # 상한가/VI 근처 종목 제외 (사이드카·매수불가)
 BREAKOUT_LOOKBACK = 10             # 최근 10봉 기준 돌파 (짧게)
 VOL_SURGE_RATIO = 1.5              # 전일 대비 150%+ (장 초반 대응)
 
@@ -180,6 +181,15 @@ class StockScanner:
             trade_val = item.get("trade_value", 0)
             change_pct = item.get("change_pct", 0)
             volume = item.get("volume", 0)
+
+            # 상한가/VI 근처 종목 제외 (사이드카 걸리면 매수 불가)
+            if change_pct >= MAX_CHANGE_PCT:
+                logger.info(
+                    "[스캐너 1단계] 제외(상한가근처): %s %s | %+.1f%% ≥ %.0f%%",
+                    code, item.get("name", "?"), change_pct, MAX_CHANGE_PCT,
+                )
+                skip_low_value += 1
+                continue
 
             # 기본 필터: 거래대금 30억+ 또는 등락률 1.0%+
             if trade_val < MIN_TRADE_VALUE and change_pct < MIN_CHANGE_PCT:
