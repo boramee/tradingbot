@@ -87,7 +87,7 @@ class CombinedStrategy(BaseStrategy):
         except Exception as e:
             logger.debug("상위TF 조회 실패: %s", e)
 
-    def analyze(self, df: pd.DataFrame) -> TradeSignal:
+    def analyze(self, df: pd.DataFrame, scanner_score: float = 0) -> TradeSignal:
         price = float(df["close"].iloc[-1])
 
         # ── 시장 상태 분류 ──
@@ -163,6 +163,12 @@ class CombinedStrategy(BaseStrategy):
             buy_score *= (1 + boost)
             sell_score *= (1 + boost)
             reasons.append("거래량%.1fx" % vol_ratio)
+
+        # ── 스캐너 보너스 (스캐너가 검증한 종목은 매수 가산) ──
+        if scanner_score >= 80:
+            scanner_bonus = min(0.2, scanner_score / 500)
+            buy_score += scanner_bonus
+            reasons.append("스캐너%.0f점" % scanner_score)
 
         # ── 피봇포인트 → 감점만 (차단하지 않음) ──
         pivots = self._adv.pivot_points(df)
