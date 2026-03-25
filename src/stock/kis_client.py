@@ -315,32 +315,44 @@ class KISClient:
                 timeout=10,
             )
             data = resp.json()
+            rt_cd = str(data.get("rt_cd", ""))
+            output = data.get("output", [])
             logger.info("[KIS] 거래량순위 응답: HTTP %d, rt_cd=%s, msg=%s, output건수=%d",
-                        resp.status_code,
-                        data.get("rt_cd", "N/A"),
+                        resp.status_code, rt_cd,
                         data.get("msg1", data.get("msg", "N/A")),
-                        len(data.get("output", [])))
+                        len(output) if output else 0)
             # API 에러 응답 체크
-            rt_cd = data.get("rt_cd", "")
-            if rt_cd != "0" and rt_cd != "":
+            if rt_cd not in ("0", ""):
                 logger.error("[KIS] 거래량순위 API 에러: rt_cd=%s, msg=%s, 전체응답=%s",
                              rt_cd, data.get("msg1", data.get("msg", "")),
                              str(data)[:500])
                 return []
-            items = data.get("output", [])
+            if not output:
+                logger.warning("[KIS] 거래량순위 output 비어있음 — 전체응답키: %s", list(data.keys()))
+                return []
+            items = output
             results = []
             for item in items[:limit]:
                 code = item.get("mksc_shrn_iscd", "")
                 if not code:
                     continue
+                try:
+                    trade_value = int(item.get("acml_tr_pbmn", 0))
+                except (ValueError, TypeError):
+                    trade_value = 0
+                try:
+                    change_pct = float(item.get("prdy_ctrt", 0))
+                except (ValueError, TypeError):
+                    change_pct = 0.0
                 results.append({
                     "code": code,
                     "name": item.get("hts_kor_isnm", ""),
-                    "price": int(item.get("stck_prpr", 0)),
-                    "change_pct": float(item.get("prdy_ctrt", 0)),
-                    "volume": int(item.get("acml_vol", 0)),
-                    "trade_value": int(item.get("acml_tr_pbmn", 0)),
+                    "price": int(item.get("stck_prpr", 0) or 0),
+                    "change_pct": change_pct,
+                    "volume": int(item.get("acml_vol", 0) or 0),
+                    "trade_value": trade_value,
                 })
+            logger.info("[KIS] 거래량순위 파싱 완료: %d종목", len(results))
             return results
         except Exception as e:
             logger.error("[KIS] 거래량 순위 조회 실패: %s", e)
