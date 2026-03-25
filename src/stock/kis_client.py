@@ -40,11 +40,15 @@ class KISClient:
 
         self._token: str = ""
         self._token_expires: float = 0
+        self._token_retry_after: float = 0  # 토큰 재시도 쿨다운
 
         if app_key and app_secret:
             self._refresh_token()
             mode = "모의투자" if is_virtual else "실전"
-            logger.info("[KIS] 인증 완료 (%s, 계좌: %s)", mode, account_no)
+            if self._token:
+                logger.info("[KIS] 인증 완료 (%s, 계좌: %s)", mode, account_no)
+            else:
+                logger.warning("[KIS] 초기 토큰 발급 실패 — 60초 후 재시도 예정")
 
     @property
     def is_authenticated(self) -> bool:
@@ -53,6 +57,10 @@ class KISClient:
     # ── 인증 ──
 
     def _refresh_token(self):
+        now = time.time()
+        # 1분당 1회 제한 — 쿨다운 내에는 재시도하지 않음
+        if now < self._token_retry_after:
+            return
         try:
             resp = requests.post(
                 "%s/oauth2/tokenP" % self.base_url,
@@ -67,17 +75,20 @@ class KISClient:
             token = data.get("access_token", "")
             if not token:
                 error_msg = data.get("msg1", data.get("message", str(data)))
-                logger.error("[KIS] 토큰 발급 실패 — 응답: %s", error_msg)
+                logger.error("[KIS] 토큰 발급 실패 — 응답: %s (65초 후 재시도)", error_msg)
+                self._token_retry_after = now + 65  # KIS 1분 제한 + 여유 5초
                 return
             self._token = token
             expires_in = int(data.get("expires_in", 86400))
-            self._token_expires = time.time() + expires_in - 600
+            self._token_expires = now + expires_in - 600
+            self._token_retry_after = 0
             logger.info("[KIS] 토큰 발급 완료 (유효: %d초)", expires_in)
         except Exception as e:
-            logger.error("[KIS] 토큰 발급 실패: %s", e)
+            logger.error("[KIS] 토큰 발급 실패: %s (65초 후 재시도)", e)
+            self._token_retry_after = now + 65
 
     def _ensure_token(self):
-        if time.time() >= self._token_expires:
+        if not self._token or time.time() >= self._token_expires:
             self._refresh_token()
 
     def _headers(self, tr_id: str) -> Dict[str, str]:
