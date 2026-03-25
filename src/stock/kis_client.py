@@ -129,7 +129,7 @@ class KISClient:
                 "low": int(output.get("stck_lwpr", 0)),
                 "volume": int(output.get("acml_vol", 0)),
                 "change_pct": float(output.get("prdy_ctrt", 0)),
-                "name": output.get("rprs_mrkt_kor_name", ""),
+                "name": output.get("hts_kor_isnm", ""),
             }
         except Exception as e:
             logger.error("[KIS] 현재가 조회 실패 [%s]: %s", stock_code, e)
