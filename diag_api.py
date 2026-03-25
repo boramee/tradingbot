@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """KIS API 거래량순위 직접 진단 스크립트"""
-import os, sys, json, requests
+import os, sys, json, time, requests
 
 # .env 로드
 env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -33,19 +33,52 @@ if not token:
     sys.exit(1)
 print(f"OK: token={token[:20]}...")
 
-# 2. 거래량순위 조회
-print("\n=== 2. 거래량순위 API ===")
 headers = {
     "authorization": f"Bearer {token}",
     "appkey": APP_KEY,
     "appsecret": APP_SECRET,
-    "tr_id": "FHPST01710000",
     "custtype": "P",
     "Content-Type": "application/json; charset=utf-8",
 }
-params = {
+
+# 2. 여러 FID_COND_SCR_DIV_CODE 값 시도
+for scr_code in ["20171", "20170", "20101"]:
+    print(f"\n=== 거래량순위 (SCR_DIV_CODE={scr_code}) ===")
+    headers["tr_id"] = "FHPST01710000"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_COND_SCR_DIV_CODE": scr_code,
+        "FID_INPUT_ISCD": "0000",
+        "FID_DIV_CLS_CODE": "0",
+        "FID_BLNG_CLS_CODE": "0",
+        "FID_TRGT_CLS_CODE": "111111111",
+        "FID_TRGT_EXLS_CLS_CODE": "000000",
+        "FID_INPUT_PRICE_1": "0",
+        "FID_INPUT_PRICE_2": "0",
+        "FID_VOL_CNT": "0",
+        "FID_INPUT_DATE_1": "",
+    }
+    resp = requests.get(f"{BASE}/uapi/domestic-stock/v1/quotations/volume-rank",
+                        headers=headers, params=params, timeout=10)
+    data = resp.json()
+    output = data.get("output", [])
+    print(f"HTTP {resp.status_code} | rt_cd={data.get('rt_cd')} | msg={data.get('msg1','N/A')} | output={len(output)}건")
+
+    if output:
+        print("상위 5종목:")
+        for i, item in enumerate(output[:5]):
+            print(f"  {i+1}. {item.get('mksc_shrn_iscd','?')} {item.get('hts_kor_isnm','?')} "
+                  f"| {item.get('stck_prpr','?')}원 | {item.get('prdy_ctrt','?')}%")
+        break  # 성공하면 중단
+
+    time.sleep(0.5)  # API 호출 간격
+
+# 3. 대안: 등락률 상위 (FHPST01700000)
+print(f"\n=== 등락률순위 (대안 API) ===")
+headers["tr_id"] = "FHPST01700000"
+params2 = {
     "FID_COND_MRKT_DIV_CODE": "J",
-    "FID_COND_SCR_DIV_CODE": "20101",
+    "FID_COND_SCR_DIV_CODE": "20170",
     "FID_INPUT_ISCD": "0000",
     "FID_DIV_CLS_CODE": "0",
     "FID_BLNG_CLS_CODE": "0",
@@ -57,23 +90,14 @@ params = {
     "FID_INPUT_DATE_1": "",
 }
 resp = requests.get(f"{BASE}/uapi/domestic-stock/v1/quotations/volume-rank",
-                    headers=headers, params=params, timeout=10)
-print(f"HTTP: {resp.status_code}")
+                    headers=headers, params=params2, timeout=10)
 data = resp.json()
-print(f"rt_cd: {data.get('rt_cd')}")
-print(f"msg1: {data.get('msg1', data.get('msg', 'N/A'))}")
 output = data.get("output", [])
-print(f"output 건수: {len(output)}")
-
-if not output:
-    print(f"\n전체 응답:\n{json.dumps(data, ensure_ascii=False, indent=2)[:2000]}")
-else:
-    print("\n상위 10종목:")
-    for i, item in enumerate(output[:10]):
-        code = item.get("mksc_shrn_iscd", "?")
-        name = item.get("hts_kor_isnm", "?")
-        price = item.get("stck_prpr", "?")
-        pct = item.get("prdy_ctrt", "?")
-        vol = item.get("acml_vol", "?")
-        tval = item.get("acml_tr_pbmn", "?")
-        print(f"  {i+1:2d}. {code} {name:12s} | {price:>8s}원 | {pct:>6s}% | 거래량:{vol} | 거래대금:{tval}")
+print(f"HTTP {resp.status_code} | rt_cd={data.get('rt_cd')} | msg={data.get('msg1','N/A')} | output={len(output)}건")
+if output:
+    print("상위 5종목:")
+    for i, item in enumerate(output[:5]):
+        print(f"  {i+1}. {item.get('mksc_shrn_iscd','?')} {item.get('hts_kor_isnm','?')} "
+              f"| {item.get('stck_prpr','?')}원 | {item.get('prdy_ctrt','?')}%")
+elif not output:
+    print(f"전체 응답: {json.dumps(data, ensure_ascii=False)[:500]}")
