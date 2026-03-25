@@ -621,7 +621,7 @@ class StockEngine(BaseTradingEngine):
         # ── 시간대별 매수 필터 ──
         if mode == "opening_wait":
             return
-        if mode == "closing":
+        if mode == "closing" and not self.auto_scan:
             return
 
         # ── 쿨다운 (v4: 공통 로직) ──
