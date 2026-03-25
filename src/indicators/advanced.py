@@ -97,7 +97,7 @@ class AdvancedIndicators:
 
         bb_width = (bb_upper - bb_lower) / bb_mid * 100 if bb_mid > 0 else 0
 
-        if bb_width > 15:
+        if bb_width > 8:
             return "volatile"
 
         if adx >= 25:
