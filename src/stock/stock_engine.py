@@ -727,73 +727,83 @@ class StockEngine(BaseTradingEngine):
     # ── 시작 ──
 
     def preflight_check(self) -> bool:
-        """실전 투입 전 사전점검. 문제가 있으면 False 반환 + 텔레그램 리포트."""
+        """실전 투입 전 사전점검. 필수 항목 실패 시 False 반환 + 텔레그램 리포트."""
+        # (이름, 통과여부, 상세, 필수여부)
         checks = []
 
-        # 1. KIS 인증
+        # 1. KIS 인증 (필수)
         if self.kis.is_authenticated:
-            checks.append(("KIS 인증", True, "토큰 정상"))
+            checks.append(("KIS 인증", True, "토큰 정상", True))
         else:
-            checks.append(("KIS 인증", False, "토큰 없음 — .env에 KIS_APP_KEY/SECRET 확인"))
+            checks.append(("KIS 인증", False, "토큰 없음 — .env에 KIS_APP_KEY/SECRET 확인", True))
 
-        # 2. 잔고 조회
+        # 2. 잔고 조회 (경고)
         cash = 0
         if self.kis.is_authenticated:
             balance = self.kis.get_balance()
             if balance and balance.get("cash", 0) > 0:
                 cash = balance["cash"]
-                checks.append(("잔고 조회", True, "%s원" % "{:,}".format(cash)))
+                checks.append(("잔고 조회", True, "%s원" % "{:,}".format(cash), False))
             else:
-                checks.append(("잔고 조회", False, "잔고 0원 또는 조회 실패"))
+                checks.append(("잔고 조회", False, "잔고 0원 또는 조회 실패", False))
         else:
-            checks.append(("잔고 조회", False, "인증 필요"))
+            checks.append(("잔고 조회", False, "인증 필요", False))
 
-        # 3. 시세 조회
+        # 3. 시세 조회 (필수)
         price = self._get_price()
         if price > 0:
             checks.append(("시세 조회", True, "%s %s: %s원" % (
-                self.stock_code, self._stock_name, "{:,}".format(price))))
+                self.stock_code, self._stock_name, "{:,}".format(price)), True))
         else:
-            checks.append(("시세 조회", False, "%s 시세 조회 실패" % self.stock_code))
+            checks.append(("시세 조회", False, "%s 시세 조회 실패" % self.stock_code, True))
 
-        # 4. 텔레그램
+        # 4. 텔레그램 (경고)
         if self.telegram.enabled:
-            checks.append(("텔레그램", True, "활성화"))
+            checks.append(("텔레그램", True, "활성화", False))
         else:
-            checks.append(("텔레그램", False, "비활성 — TELEGRAM_TOKEN/CHAT_ID 확인"))
+            checks.append(("텔레그램", False, "비활성 — TELEGRAM_TOKEN/CHAT_ID 확인", False))
 
-        # 5. 투자 가능 여부
+        # 5. 투자 가능 여부 (경고 — 스캐너가 저가 종목을 찾을 수 있음)
         if cash > 0 and price > 0:
             max_qty = min(int(cash * self.invest_ratio), self.max_invest_krw) // price
             if max_qty > 0:
                 checks.append(("매수 가능", True, "최대 %d주 (약 %s원)" % (
-                    max_qty, "{:,}".format(max_qty * price))))
+                    max_qty, "{:,}".format(max_qty * price)), False))
             else:
                 checks.append(("매수 가능", False, "투자금 부족 (잔고: %s원, 주가: %s원)" % (
-                    "{:,}".format(cash), "{:,}".format(price))))
+                    "{:,}".format(cash), "{:,}".format(price)), False))
 
         # 6. 거래 모드
         if self.kis.is_virtual:
-            checks.append(("거래 모드", True, "⚠️ 모의투자"))
+            checks.append(("거래 모드", True, "⚠️ 모의투자", False))
         else:
-            checks.append(("거래 모드", True, "🔴 실전"))
+            checks.append(("거래 모드", True, "🔴 실전", False))
 
-        # 결과 종합
-        all_ok = all(ok for _, ok, _ in checks)
+        # 결과 종합: 필수 항목만 봇 시작 차단
+        critical_ok = all(ok for _, ok, _, required in checks if required)
+        has_warning = any(not ok for _, ok, _, required in checks if not required)
         lines = []
-        for name, ok, detail in checks:
-            mark = "✅" if ok else "❌"
+        for name, ok, detail, required in checks:
+            if ok:
+                mark = "✅"
+            elif required:
+                mark = "❌"
+            else:
+                mark = "⚠️"
             lines.append("%s %s: %s" % (mark, name, detail))
 
+        status = "통과" if critical_ok and not has_warning else "경고있음" if critical_ok else "실패"
         report = "\n".join(lines)
-        logger.info("[사전점검] %s\n%s", "통과" if all_ok else "실패", report)
+        logger.info("[사전점검] %s\n%s", status, report)
 
-        tg_report = "<b>🔍 사전점검 %s</b>\n\n%s" % ("통과 ✅" if all_ok else "실패 ❌", report)
-        if not all_ok:
-            tg_report += "\n\n⚠️ 실패 항목을 확인하세요."
+        tg_report = "<b>🔍 사전점검 %s</b>\n\n%s" % (status, report)
+        if not critical_ok:
+            tg_report += "\n\n❌ 필수 항목 실패 — 봇을 시작할 수 없습니다."
+        elif has_warning:
+            tg_report += "\n\n⚠️ 경고 항목이 있지만 봇은 시작합니다."
         self.telegram.send(tg_report)
 
-        return all_ok
+        return critical_ok
 
     def start(self, poll_sec: int = 10):
         self.running = True
