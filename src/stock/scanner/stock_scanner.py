@@ -42,11 +42,11 @@ SECTOR_MAP = {
     "화장품": ["090430", "285130", "192820"],
 }
 
-# 단타 기준 (스윙보다 공격적)
-MIN_TRADE_VALUE = 10_000_000_000   # 100억 이상 (중소형 포함)
-MIN_CHANGE_PCT = 1.5               # 1.5% 이상 움직이는 종목
+# 단타 기준 (스윙보다 공격적) - 장 초반에도 후보 잡히도록 완화
+MIN_TRADE_VALUE = 3_000_000_000    # 30억 이상 (장 초반 대응)
+MIN_CHANGE_PCT = 1.0               # 1.0% 이상 움직이는 종목
 BREAKOUT_LOOKBACK = 10             # 최근 10봉 기준 돌파 (짧게)
-VOL_SURGE_RATIO = 2.0             # 전일 대비 200%+ (낮춰서 후보 늘림)
+VOL_SURGE_RATIO = 1.5              # 전일 대비 150%+ (장 초반 대응)
 
 
 @dataclass
@@ -159,9 +159,17 @@ class StockScanner:
             change_pct = item.get("change_pct", 0)
             volume = item.get("volume", 0)
 
-            # 기본 필터: 거래대금 100억+ 또는 등락률 1.5%+
+            # 기본 필터: 거래대금 30억+ 또는 등락률 1.0%+
             if trade_val < MIN_TRADE_VALUE and change_pct < MIN_CHANGE_PCT:
                 skip_low_value += 1
+                if skip_low_value <= 3:
+                    logger.debug(
+                        "[스캐너 1단계] 탈락: %s %s | 거래대금 %s억 < %s억, 등락률 %.1f%% < %.1f%%",
+                        code, item.get("name", "?"),
+                        "{:,.0f}".format(trade_val / 1_0000_0000),
+                        "{:,.0f}".format(MIN_TRADE_VALUE / 1_0000_0000),
+                        change_pct, MIN_CHANGE_PCT,
+                    )
                 continue
 
             vol_surge = self._check_volume_surge(code)
@@ -187,6 +195,25 @@ class StockScanner:
 
         logger.debug("[스캐너 1단계] 후보: %d종목 (제외됨: 거래대금미달 %d, 이미매매 %d)",
                      len(candidates), skip_low_value, skip_excluded)
+
+        # 후보 0이면 거래대금 상위 5개를 무조건 포함 (장 초반 대응)
+        if not candidates and rankings:
+            logger.warning("[스캐너 1단계] 후보 0 → 거래대금 상위 5종목 강제 편입")
+            for item in rankings[:5]:
+                code = item["code"]
+                if code in self._excluded:
+                    continue
+                candidates.append(ScanResult(
+                    code=code,
+                    name=item.get("name", ""),
+                    price=item.get("price", 0),
+                    change_pct=item.get("change_pct", 0),
+                    trade_value=item.get("trade_value", 0),
+                    volume=item.get("volume", 0),
+                    score=5,
+                    reasons=["거래대금상위(강제편입)"],
+                ))
+
         return candidates
 
     def _check_volume_surge(self, code: str) -> float:
