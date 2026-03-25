@@ -87,8 +87,8 @@ class AdaptiveStrategy(BaseStrategy):
         if bb_upper and bb_lower and bb_mid and bb_mid > 0:
             bb_width = (bb_upper - bb_lower) / bb_mid * 100
 
-        # 고변동장: ATR 급증 + 밴드폭 과대 (둘 다 충족해야 차단)
-        if atr_surge and bb_width > 15:
+        # 고변동장: ATR 급증 또는 밴드폭 과대
+        if atr_surge or bb_width > 8:
             return "volatile"
 
         # 추세장: ADX 높고 방향 명확
@@ -113,5 +113,5 @@ class AdaptiveStrategy(BaseStrategy):
         elif mode == "ranging":
             return self._bollinger
         elif mode == "volatile":
-            return None  # 고변동장에서는 매매 안 함
+            return self._rsi  # 고변동장: RSI로 보수적 매매
         return self._macd

@@ -94,10 +94,13 @@ class CombinedStrategy(BaseStrategy):
         market = self._adv.classify_market(df)
         adx = self._last(df, "adx")
 
-        # 고변동장만 완전 차단, 횡보장은 볼린저 신호 허용
-        if market == "volatile":
-            return TradeSignal(Signal.HOLD, 0,
-                               "[고변동] 매매 중지 (BB 밴드폭 과대)", price)
+        # 고변동장: RSI 과매수(75+)면 차단, 아니면 감점 후 진행
+        is_volatile = (market == "volatile")
+        if is_volatile:
+            rsi = self._last(df, "rsi")
+            if rsi is not None and rsi > 75:
+                return TradeSignal(Signal.HOLD, 0,
+                                   "[고변동] RSI 과매수 (%.0f > 75)" % rsi, price)
 
         # ── 거래량 필터 (완화) ──
         vol_ratio = self._last(df, "vol_ratio")
@@ -182,6 +185,9 @@ class CombinedStrategy(BaseStrategy):
                 reasons.append("상위TF하락")
             if market == "ranging":
                 conf *= 0.8  # 횡보장에서도 감점만
+            if is_volatile:
+                conf *= 0.7  # 고변동장: 차단 대신 감점
+                reasons.append("고변동감점")
 
             # 보너스 요소
             if divergence == "bullish":
