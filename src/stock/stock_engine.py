@@ -674,34 +674,41 @@ class StockEngine(BaseTradingEngine):
         """자동 스캔: 스캐너 → 필터 → 전략 → 매수"""
         ok, reason = self._pre_buy_checks(now, df, price)
         if not ok:
+            logger.debug("[자동스캔] 매수 필터 차단: %s", reason)
             return
 
         best = self.scanner.get_best()
         if not best:
+            logger.debug("[자동스캔] 스캐너 후보 없음")
             return
+
+        logger.info("[자동스캔] 후보: %s %s (%.0f점, %+.1f%%)",
+                    best.code, best.name, best.score, best.change_pct)
 
         # 스캔 종목의 차트 분석
         scan_df = self.kis.get_ohlcv(best.code, period="D", count=60)
         if scan_df is None or len(scan_df) < 20:
+            logger.info("[자동스캔] %s OHLCV 데이터 부족 → 스킵", best.name)
             return
 
         scan_df = self.indicators.add_all(scan_df)
         sig = self.strategy.analyze(scan_df)
 
         if sig.signal != Signal.BUY or not sig.is_actionable:
+            logger.info("[자동스캔] %s 전략 시그널 미발생 (%s) → 스킵", best.name, sig.reason)
             return
 
         # VI 체크
         scan_info = self.kis.get_current_price(best.code)
         if scan_info and scan_info.get("change_pct", 0) >= 25:
-            logger.info("[스캐너] %s VI 근처 → 스킵", best.name)
+            logger.info("[자동스캔] %s VI 근처 → 스킵", best.name)
             return
 
         # 갭 체크
         scan_price = scan_info["price"] if scan_info else 0
         gap = self._check_gap(scan_df, scan_price)
         if gap:
-            logger.info("[스캐너] %s %s → 스킵", best.name, gap)
+            logger.info("[자동스캔] %s %s → 스킵", best.name, gap)
             return
 
         # 종목 전환
@@ -714,6 +721,7 @@ class StockEngine(BaseTradingEngine):
         atr = float(scan_df["atr"].iloc[-1]) if "atr" in scan_df.columns and pd.notna(scan_df["atr"].iloc[-1]) else 0
         scan_reason = "스캐너(%.0f점: %s) + %s" % (best.score, ", ".join(best.reasons[:3]), sig.reason)
 
+        logger.info("[자동스캔] %s %s 매수 시도 (사유: %s)", best.code, best.name, scan_reason)
         if self._buy(scan_reason, current_atr=atr):
             self.scanner.exclude(best.code)
             if best.sector:
@@ -722,6 +730,7 @@ class StockEngine(BaseTradingEngine):
                     % (best.code, best.name, best.score,
                        best.sector or "개별", ", ".join(best.reasons)))
         else:
+            logger.info("[자동스캔] %s 매수 실패 (잔고 부족 가능)", best.name)
             self.stock_code = old_code
 
     # ── 시작 ──
