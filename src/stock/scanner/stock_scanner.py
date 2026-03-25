@@ -128,18 +128,40 @@ class StockScanner:
     def _stage1_volume_scan(self) -> List[ScanResult]:
         rankings = self.kis.get_volume_rank(limit=50)
 
+        if not rankings:
+            logger.debug("[스캐너 1단계] get_volume_rank 응답 0건 (API 오류 또는 장 초반)")
+            return []
+
+        logger.debug("[스캐너 1단계] 거래량순위 %d종목 수신", len(rankings))
+
+        # 상위 5개 종목 현황 로깅 (어떤 종목이 오는지 확인용)
+        for i, item in enumerate(rankings[:5]):
+            tv = item.get("trade_value", 0)
+            logger.debug(
+                "[스캐너 1단계] #%d %s %s | %+.1f%% | 거래대금: %s억 | 거래량: %s",
+                i + 1, item.get("code", "?"), item.get("name", "?"),
+                item.get("change_pct", 0),
+                "{:,.0f}".format(tv / 1_0000_0000) if tv else "0",
+                "{:,}".format(item.get("volume", 0)),
+            )
+
         candidates = []
+        skip_low_value = 0
+        skip_excluded = 0
+
         for item in rankings:
             code = item["code"]
             if code in self._excluded:
+                skip_excluded += 1
                 continue
 
             trade_val = item.get("trade_value", 0)
             change_pct = item.get("change_pct", 0)
             volume = item.get("volume", 0)
 
-            # 기본 필터: 거래대금 500억+ 또는 등락률 2%+
+            # 기본 필터: 거래대금 100억+ 또는 등락률 1.5%+
             if trade_val < MIN_TRADE_VALUE and change_pct < MIN_CHANGE_PCT:
+                skip_low_value += 1
                 continue
 
             vol_surge = self._check_volume_surge(code)
@@ -163,7 +185,8 @@ class StockScanner:
             elif trade_val >= MIN_TRADE_VALUE or change_pct >= MIN_CHANGE_PCT:
                 candidates.append(cand)
 
-        logger.debug("[스캐너 1단계] 후보: %d종목", len(candidates))
+        logger.debug("[스캐너 1단계] 후보: %d종목 (제외됨: 거래대금미달 %d, 이미매매 %d)",
+                     len(candidates), skip_low_value, skip_excluded)
         return candidates
 
     def _check_volume_surge(self, code: str) -> float:
