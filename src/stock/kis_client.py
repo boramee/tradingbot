@@ -315,11 +315,16 @@ class KISClient:
                 timeout=10,
             )
             data = resp.json()
+            logger.debug("[KIS] 거래량순위 응답: rt_cd=%s, msg=%s, output건수=%d",
+                         data.get("rt_cd", "N/A"),
+                         data.get("msg1", data.get("msg", "N/A")),
+                         len(data.get("output", [])))
             # API 에러 응답 체크
             rt_cd = data.get("rt_cd", "")
             if rt_cd != "0" and rt_cd != "":
-                logger.error("[KIS] 거래량순위 API 에러: rt_cd=%s, msg=%s",
-                             rt_cd, data.get("msg1", data.get("msg", "")))
+                logger.error("[KIS] 거래량순위 API 에러: rt_cd=%s, msg=%s, 전체응답=%s",
+                             rt_cd, data.get("msg1", data.get("msg", "")),
+                             str(data)[:500])
                 return []
             items = data.get("output", [])
             results = []
