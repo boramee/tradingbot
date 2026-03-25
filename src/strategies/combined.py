@@ -94,13 +94,13 @@ class CombinedStrategy(BaseStrategy):
         market = self._adv.classify_market(df)
         adx = self._last(df, "adx")
 
-        # 고변동장: RSI 과매수(75+)면 차단, 아니면 감점 후 진행
+        # 고변동장: RSI 극과매수(85+)면 차단, 아니면 감점 후 진행
         is_volatile = (market == "volatile")
         if is_volatile:
             rsi = self._last(df, "rsi")
-            if rsi is not None and rsi > 75:
+            if rsi is not None and rsi > 85:
                 return TradeSignal(Signal.HOLD, 0,
-                                   "[고변동] RSI 과매수 (%.0f > 75)" % rsi, price)
+                                   "[고변동] RSI 극과매수 (%.0f > 85)" % rsi, price)
 
         # ── 거래량 필터 (완화) ──
         vol_ratio = self._last(df, "vol_ratio")
