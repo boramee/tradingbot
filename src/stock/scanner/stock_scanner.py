@@ -103,6 +103,17 @@ class StockScanner:
             return []
 
         filtered = self._stage2_breakout_filter(candidates)
+
+        # 2단계 전부 탈락 시, 1단계 상위 3종목 최소 보장
+        if not filtered and candidates:
+            logger.warning("[스캐너] 2단계 전부 탈락 → 1단계 상위 3종목 사용")
+            candidates.sort(key=lambda c: c.trade_value, reverse=True)
+            for c in candidates[:3]:
+                if c.score < 10:
+                    c.score = 10
+                c.reasons.append("2단계면제(최소보장)")
+            filtered = candidates[:3]
+
         scored = self._stage3_sector_scoring(filtered)
         scored.sort(key=lambda r: r.score, reverse=True)
 
@@ -114,6 +125,8 @@ class StockScanner:
                         len(scored),
                         " / ".join("%s(%+.1f%%,%.0f점)" % (r.name, r.change_pct, r.score)
                                    for r in scored[:5]))
+        else:
+            logger.warning("[스캐너] 최종 후보 0종목 (1단계 %d종목 모두 탈락)", len(candidates))
         return scored
 
     def get_best(self) -> Optional[ScanResult]:
@@ -133,15 +146,15 @@ class StockScanner:
         rankings = self.kis.get_volume_rank(limit=50)
 
         if not rankings:
-            logger.debug("[스캐너 1단계] get_volume_rank 응답 0건 (API 오류 또는 장 초반)")
+            logger.warning("[스캐너 1단계] get_volume_rank 응답 0건 — API 오류 또는 장 미개시")
             return []
 
-        logger.debug("[스캐너 1단계] 거래량순위 %d종목 수신", len(rankings))
+        logger.info("[스캐너 1단계] 거래량순위 %d종목 수신", len(rankings))
 
         # 상위 5개 종목 현황 로깅 (어떤 종목이 오는지 확인용)
         for i, item in enumerate(rankings[:5]):
             tv = item.get("trade_value", 0)
-            logger.debug(
+            logger.info(
                 "[스캐너 1단계] #%d %s %s | %+.1f%% | 거래대금: %s억 | 거래량: %s",
                 i + 1, item.get("code", "?"), item.get("name", "?"),
                 item.get("change_pct", 0),
@@ -176,8 +189,6 @@ class StockScanner:
                     )
                 continue
 
-            vol_surge = self._check_volume_surge(code)
-
             cand = ScanResult(
                 code=code,
                 name=item.get("name", ""),
@@ -189,16 +200,11 @@ class StockScanner:
                 reasons=[],
             )
 
-            # 전일 대비 거래량 급증이면 별도 가산 + 무조건 포함
-            if vol_surge >= VOL_SURGE_RATIO:
-                cand.score += 25
-                cand.reasons.append("거래량전일비%.0f%%" % (vol_surge * 100))
-                candidates.append(cand)
-            elif trade_val >= MIN_TRADE_VALUE or change_pct >= MIN_CHANGE_PCT:
-                candidates.append(cand)
+            # 거래대금 또는 등락률 조건 통과 → 후보에 추가
+            candidates.append(cand)
 
-        logger.debug("[스캐너 1단계] 후보: %d종목 (제외됨: 거래대금미달 %d, 이미매매 %d)",
-                     len(candidates), skip_low_value, skip_excluded)
+        logger.info("[스캐너 1단계] 후보: %d종목 (제외됨: 거래대금미달 %d, 이미매매 %d)",
+                    len(candidates), skip_low_value, skip_excluded)
 
         # 후보 0이면 거래대금 상위 5개를 무조건 포함 (장 초반 대응)
         if not candidates and rankings:
@@ -214,7 +220,7 @@ class StockScanner:
                     change_pct=item.get("change_pct", 0),
                     trade_value=item.get("trade_value", 0),
                     volume=item.get("volume", 0),
-                    score=5,
+                    score=20,
                     reasons=["거래대금상위(강제편입)"],
                 ))
 
@@ -245,10 +251,21 @@ class StockScanner:
 
             df = self.kis.get_ohlcv(cand.code, period="D", count=60)
             if df is None or len(df) < BREAKOUT_LOOKBACK:
+                logger.debug("[스캐너 2단계] %s %s OHLCV 부족 → 스킵", cand.code, cand.name)
                 continue
 
             df = self.ti.add_all(df)
             latest = df.iloc[-1]
+
+            # 전일 대비 거래량 급증 체크 (1단계에서 이동)
+            if len(df) >= 2:
+                today_vol = float(df["volume"].iloc[-1])
+                prev_vol = float(df["volume"].iloc[-2])
+                if prev_vol > 0:
+                    vol_surge = today_vol / prev_vol
+                    if vol_surge >= VOL_SURGE_RATIO:
+                        score += 25
+                        reasons.append("거래량전일비%.0f%%" % (vol_surge * 100))
 
             # 당일 신고가 돌파
             recent_high = df["high"].iloc[-BREAKOUT_LOOKBACK:-1].max()
@@ -278,7 +295,7 @@ class StockScanner:
                 score += 10
                 reasons.append("RSI적정(%.0f)" % rsi)
 
-            # 거래량 급증 (당일 봉 기준)
+            # 거래량 급증 (당일 봉 기준 — 이평 대비)
             vol_ratio = latest.get("vol_ratio")
             if pd.notna(vol_ratio) and vol_ratio > 2.0:
                 score += 15
@@ -319,12 +336,14 @@ class StockScanner:
                     score -= 10
                     reasons.append("호가위험(매도압도)")
 
-            if score >= 15:
+            if score >= 10:
                 cand.score = score
                 cand.reasons = reasons
                 filtered.append(cand)
+            else:
+                logger.debug("[스캐너 2단계] 탈락: %s %s | 점수 %d < 10", cand.code, cand.name, score)
 
-        logger.debug("[스캐너 2단계] 돌파 후보: %d종목", len(filtered))
+        logger.info("[스캐너 2단계] 돌파 후보: %d종목 (분석: %d종목)", len(filtered), min(len(candidates), 25))
         return filtered
 
     # ── 3단계: 섹터 쏠림 + 대장주 + 섹터 평균 등락률 ──
