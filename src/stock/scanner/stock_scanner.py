@@ -149,17 +149,14 @@ class StockScanner:
             logger.info("[스캐너 1단계] KIS 미인증 — 토큰 대기 중")
             return []
 
-        # 코스피 + 코스닥 양쪽 조회 → 합산
-        rankings_kospi = self.kis.get_volume_rank(market="J", limit=30)
-        rankings_kosdaq = self.kis.get_volume_rank(market="Q", limit=30)
-        rankings = (rankings_kospi or []) + (rankings_kosdaq or [])
+        # J = 전체(코스피+코스닥), 50종목 조회
+        rankings = self.kis.get_volume_rank(market="J", limit=50)
 
         if not rankings:
             logger.warning("[스캐너 1단계] get_volume_rank 응답 0건 — API 오류 또는 장 미개시")
             return []
 
-        logger.info("[스캐너 1단계] 거래량순위 %d종목 수신 (코스피:%d + 코스닥:%d)",
-                    len(rankings), len(rankings_kospi or []), len(rankings_kosdaq or []))
+        logger.info("[스캐너 1단계] 거래량순위 %d종목 수신", len(rankings))
 
         # 상위 5개 종목 현황 로깅 (어떤 종목이 오는지 확인용)
         for i, item in enumerate(rankings[:5]):
