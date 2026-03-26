@@ -323,7 +323,7 @@ class StockEngine(BaseTradingEngine):
         if qty <= 0:
             return False
 
-        result = self.kis.buy(self.stock_code, qty)
+        result = self.kis.buy(self.stock_code, qty, price=price)
         if result and result.get("success"):
             new_pos = StockPosition(
                 code=self.stock_code, name=self._stock_name,
@@ -415,7 +415,7 @@ class StockEngine(BaseTradingEngine):
         pnl_pct = self._calc_pnl(price)
         pnl_amount = qty * price * (pnl_pct / 100)
 
-        result = self.kis.sell(self.stock_code, qty)
+        result = self.kis.sell(self.stock_code, qty, price=price)
         if result and result.get("success"):
             tag = "[분할매도]" if partial else "[매도]"
             self._daily_trades += 1
