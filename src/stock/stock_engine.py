@@ -1,17 +1,16 @@
-"""한국 주식 자동매매 엔진 v4
+"""한국 주식 자동매매 엔진 v6 (스윙 전환)
 
-v3 → v4 변경점:
-  - BaseTradingEngine 상속: 코인과 동일한 수익 관리 로직 공유
-  - ATR 기반 동적 분할익절 (3단계: 30%+30%+트레일링)
-  - ADX 적응형 트레일링 스톱 (추세 강도별 배수 조절)
-  - 분할익절 후 보호적 스톱 (손익분기 → 이익보장)
-  - 승률 기반 적응형 포지션 사이징
-  - 수익/손실 구분 재진입 쿨다운
+v5 → v6 변경점 (스캘핑 → 스윙 전환):
+  - 전일 스캐너 관심종목 → 다음날 눌림목 매수 (2-5일 보유)
+  - 손절 -3% / 익절 +5% / 트레일링 -2% / 5거래일 보유제한
+  - 장 마감 전 관심종목 스캔 저장 (watchlist.json)
+  - 눌림목 진입: 전일종가-3% 또는 5일선 지지
+  - 분봉 스캘핑 매도 → 일봉 기준 손익절로 전환
 
-v3 유지:
-  - 시초가 갭/VI/수급/코스피 필터 (주식 고유)
-  - 장마감 시간 관리 (주식 고유)
-  - 섹터 스캐너 (주식 고유)
+v4 유지:
+  - BaseTradingEngine 상속, ATR 기반 분할익절
+  - 시초가 갭/VI/수급/코스피 필터
+  - 장마감 시간 관리, 멀티 포지션 (최대 3종목)
 """
 
 from __future__ import annotations
@@ -41,6 +40,7 @@ from src.utils.daily_report import DailyReport
 from src.trader.base_engine import BaseTradingEngine
 from .kis_client import KISClient
 from .scanner import StockScanner
+from .watchlist import Watchlist, WatchItem
 from src.intelligence.market_sentiment import MarketSentiment
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class StockTradeLog:
 
 
 class StockEngine(BaseTradingEngine):
-    """한국 주식 자동매매 v4 (BaseTradingEngine 상속)"""
+    """한국 주식 자동매매 v6 스윙 (BaseTradingEngine 상속)"""
 
     def __init__(
         self,
@@ -108,10 +108,10 @@ class StockEngine(BaseTradingEngine):
         strategy_name: str = "macd",
         invest_ratio: float = 0.1,
         max_invest_krw: int = 500_000,
-        stop_loss_pct: float = 2.0,
-        take_profit_pct: float = 3.0,
-        trailing_pct: float = 1.5,
-        atr_stop_multiplier: float = 2.0,
+        stop_loss_pct: float = 3.0,
+        take_profit_pct: float = 5.0,
+        trailing_pct: float = 2.0,
+        atr_stop_multiplier: float = 2.5,
         telegram_token: str = "",
         telegram_chat_id: str = "",
     ):
@@ -137,9 +137,11 @@ class StockEngine(BaseTradingEngine):
         self.scanner = StockScanner(self.kis)
         self._scalping = ScalpingStrategy()
         self.sentiment = MarketSentiment(self.kis)
+        self.watchlist = Watchlist()
         self.position = StockPosition(code=stock_code)  # 호환용 (고정종목 모드)
         self.positions: Dict[str, StockPosition] = {}  # 멀티 종목 포지션
         self.max_positions = 3  # 최대 동시 보유 종목 수
+        self._watchlist_saved_today: str = ""  # 오늘 관심종목 저장 여부
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
         self.kill_switch = KillSwitch(max_daily_loss_pct=3.0)
         self.trade_logger = TradeLogger()
@@ -836,207 +838,226 @@ class StockEngine(BaseTradingEngine):
                 self._sell(detail)
                 sold = True
 
-            # 분봉 기반 매도 판단 (기존 손절/익절에 안 걸린 경우)
-            if not sold and mode not in ("opening_wait", "closing"):
-                now_ts = time.time()
-                # 매수 후 최소 5분은 보유 (분봉 데이터 축적 필요)
-                hold_secs = now_ts - pos.entry_time
-                if hold_secs < 300:
-                    logger.debug("[분봉매도] %s 보유 %.0f초 < 5분 → 스킵", label, hold_secs)
-                    continue
-                last_check = getattr(pos, '_last_sell_check', 0)
-                if now_ts - last_check >= 30:  # 30초 쿨다운
-                    pos._last_sell_check = now_ts
-                    try:
-                        from src.strategies.scalping import ScalpingContext
-                        sell_mdf = self.kis.get_minute_ohlcv(code)
-                        if sell_mdf is not None and len(sell_mdf) >= 5:
-                            sell_vp = self.kis.get_volume_power(code)
-                            sell_ob = self.kis.get_orderbook_ratio(code)
-                            sell_ob_ratio = sell_ob["bid_ask_ratio"] if sell_ob else 1.0
-                            sell_ctx = ScalpingContext(
-                                minute_df=sell_mdf,
-                                volume_power=sell_vp,
-                                orderbook_ratio=sell_ob_ratio,
-                            )
-                            sell_sig = self._scalping.analyze_sell(sell_ctx, pnl_pct)
-                            if sell_sig.signal == Signal.SELL:
-                                logger.info("[분봉매도] %s %s (PnL:%+.1f%%, 신뢰도:%.0f%%)",
-                                            label, sell_sig.reason, pnl_pct, sell_sig.confidence * 100)
-                                self._sell(sell_sig.reason)
-                                sold = True
-                            else:
-                                logger.debug("[분봉매도] %s 홀딩 (%s)", label, sell_sig.reason)
-                    except Exception as e:
-                        logger.warning("[분봉매도] %s 분석 실패: %s", label, e)
-
-            # 장마감 청산
-            if not sold and mode == "closing":
-                if pnl_pct > 0:
-                    self._sell("장마감 전 익절 (%+.1f%%)" % pnl_pct)
-                elif pnl_pct < -1.0:
-                    self._sell("장마감 전 손절 (%+.1f%%)" % pnl_pct)
+            # 스윙 보유기간 체크 (5거래일 초과 시 정리)
+            if not sold:
+                hold_days = (time.time() - pos.entry_time) / 86400
+                if hold_days >= 5 and mode == "closing":
+                    if pnl_pct > 0:
+                        self._sell("보유기한 5일 익절 (%+.1f%%)" % pnl_pct)
+                    else:
+                        self._sell("보유기한 5일 정리 (%+.1f%%)" % pnl_pct)
+                    sold = True
 
             # 복원
             self.stock_code = saved_code
             self._stock_name = saved_name
             self.position = saved_pos
 
-        # ── 3. 빈 슬롯 있으면 스캔 ──
+        # ── 3. 장 마감 전: 내일 관심종목 스캔 저장 ──
+        today = datetime.date.today().isoformat()
+        if mode == "closing" and self._watchlist_saved_today != today:
+            self._save_watchlist_for_tomorrow(today)
+            self._watchlist_saved_today = today
+
+        # ── 4. 빈 슬롯 있으면 관심종목 눌림목 매수 ──
         holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
         if holding_count >= self.max_positions:
             return
 
-        # 제외 복원이 비활성일 때는 스캔 후보를 막지 않도록 제외 목록 정리
-        if self.auto_scan and self.sell_exclusion_minutes == 0 and self.scanner._excluded:
-            logger.info("[자동스캔] 제외 목록 초기화 (%d건)", len(self.scanner._excluded))
-            self.scanner.clear_exclusions()
-
         if mode == "opening_wait":
-            return
-        if mode == "closing" and not self.auto_scan:
             return
 
         now = time.time()
         if self.is_in_cooldown():
             return
 
-        # 기본 df/price (스캔용)
-        df = self._fetch_data()
-        if df is None or len(df) < 20:
-            return
-        df = self.indicators.add_all(df)
-        price = self._get_price()
-        if price <= 0:
-            return
+        self._run_swing_buy(now, today)
 
-        self._run_auto_scan(now, df, price)
-
-    def _run_auto_scan(self, now: float, df, price: int):
-        """자동 스캔: 스캐너 → 분봉 단타 전략 → 매수"""
-        ok, reason = self._pre_buy_checks(now, df, price)
-        if not ok:
-            logger.debug("[자동스캔] 매수 필터 차단: %s", reason)
-            return
-
+    def _save_watchlist_for_tomorrow(self, today: str):
+        """장 마감 전: 스캐너로 내일 관심종목 저장"""
+        logger.info("[스윙] 관심종목 스캔 시작 (내일 매수 후보)")
         candidates = self.scanner.get_candidates(limit=10)
         if not candidates:
-            logger.debug("[자동스캔] 스캐너 후보 없음")
+            logger.info("[스윙] 스캐너 후보 없음")
+            return
+
+        watch_items = []
+        for best in candidates:
+            # 급등주 제외 (너무 많이 오른 건 조정폭도 큼)
+            if best.change_pct >= 15 or best.change_pct < 2:
+                continue
+
+            # 일봉 데이터로 이평선 계산
+            scan_df = self.kis.get_ohlcv(best.code, period="D", count=30)
+            ma5, ma20 = 0.0, 0.0
+            if scan_df is not None and len(scan_df) >= 20:
+                scan_df = self.indicators.add_all(scan_df)
+                if "ma_short" in scan_df.columns:
+                    v = scan_df["ma_short"].iloc[-1]
+                    if pd.notna(v):
+                        ma5 = float(v)
+                if "ma_long" in scan_df.columns:
+                    v = scan_df["ma_long"].iloc[-1]
+                    if pd.notna(v):
+                        ma20 = float(v)
+
+            # 눌림목 목표가: 전일 종가 -3% 또는 5일선 중 높은 가격
+            pullback = max(int(best.price * 0.97), int(ma5)) if ma5 > 0 else int(best.price * 0.97)
+
+            item = WatchItem(
+                code=best.code,
+                name=best.name,
+                close=best.price,
+                change_pct=best.change_pct,
+                score=best.score,
+                reasons=best.reasons[:5],
+                trade_value=best.trade_value,
+                ma5=ma5,
+                ma20=ma20,
+                pullback_target=pullback,
+            )
+            watch_items.append(item)
+            logger.info("[스윙] 관심종목: %s %s | 종가:%s원 | 5MA:%s원 | 목표매수:%s원 | 점수:%.0f",
+                        best.code, best.name,
+                        "{:,}".format(best.price),
+                        "{:,}".format(int(ma5)),
+                        "{:,}".format(pullback),
+                        best.score)
+
+        if watch_items:
+            self.watchlist.update_candidates(watch_items, today)
+            try:
+                summary = "\n".join(
+                    "• %s %s (%.0f점) 목표:%s원" % (
+                        w.code, w.name, w.score, "{:,}".format(int(w.pullback_target)))
+                    for w in watch_items[:5])
+                self.telegram.send(
+                    "<b>📋 내일 관심종목</b>\n%s\n\n총 %d종목 저장"
+                    % (summary, len(watch_items)))
+            except Exception:
+                pass
+        else:
+            logger.info("[스윙] 관심종목 조건 충족 종목 없음")
+
+    def _run_swing_buy(self, now: float, today: str):
+        """관심종목 눌림목 매수: 전일 종가 대비 조정 시 진입"""
+        # 매수 전 필터
+        ok, reason = self._pre_buy_checks(now, None, 0)
+        if not ok:
+            logger.debug("[스윙매수] 매수 필터 차단: %s", reason)
+            return
+
+        active = self.watchlist.get_active(today)
+        if not active:
+            logger.debug("[스윙매수] 활성 관심종목 없음")
             return
 
         bought_count = 0
-        for i, best in enumerate(candidates):
-            logger.info("[자동스캔] 후보 %d/%d: %s %s (%.0f점, %+.1f%%)",
-                        i + 1, len(candidates), best.code, best.name, best.score, best.change_pct)
-
-            # 이미 보유 중인 종목 스킵
-            if best.code in self.positions and self.positions[best.code].quantity > 0:
-                logger.debug("[자동스캔] %s 이미 보유 중 → 스킵", best.name)
+        for item in active:
+            # 이미 보유 중이면 스킵
+            if item.code in self.positions and self.positions[item.code].quantity > 0:
                 continue
 
-            # VI/상한가 조기 체크
-            if best.change_pct >= 25:
-                logger.info("[자동스캔] %s 상한가/VI 근처 (%+.1f%%) → 스킵", best.name, best.change_pct)
+            # 현재가 조회
+            info = self.kis.get_current_price(item.code)
+            if not info:
+                continue
+            cur_price = info["price"]
+            cur_change = info.get("change_pct", 0)
+
+            # 오늘 급락 중이면 스킵 (추가 하락 위험)
+            if cur_change <= -7:
+                logger.info("[스윙매수] %s 급락 중 (%+.1f%%) → 스킵", item.name, cur_change)
                 continue
 
-            # 이미 급등한 종목 제외 (꼭대기 매수 방지)
-            if best.change_pct >= 8:
-                logger.info("[자동스캔] %s 이미 급등 (%+.1f%%) → 스킵", best.name, best.change_pct)
-                continue
+            # ── 눌림목 조건 체크 ──
+            # 조건1: 현재가가 목표 매수가 이하 (전일 종가 -3% 또는 5일선)
+            pullback_ok = cur_price <= item.pullback_target
 
-            # 실시간 가격 확인
-            scan_info = self.kis.get_current_price(best.code)
-            if not scan_info:
-                logger.info("[자동스캔] %s 현재가 조회 실패 → 스킵", best.name)
-                continue
-            if scan_info.get("change_pct", 0) >= 25:
-                logger.info("[자동스캔] %s VI 근처 → 스킵", best.name)
-                continue
-
-            scan_price = scan_info["price"]
-
-            # ── 분봉 데이터 조회 ──
-            mdf = self.kis.get_minute_ohlcv(best.code)
-            if mdf is None or len(mdf) < 5:
-                logger.info("[자동스캔] %s 분봉 데이터 부족 (%d건) → 스킵",
-                            best.name, len(mdf) if mdf is not None else 0)
-                continue
-
-            # ── 체결강도 + 호가창 조회 ──
-            vp = self.kis.get_volume_power(best.code)
-            ob = self.kis.get_orderbook_ratio(best.code)
-            ob_ratio = ob["bid_ask_ratio"] if ob else 1.0
-
-            # ── 분봉 단타 전략 분석 ──
-            from src.strategies.scalping import ScalpingContext
-            ctx = ScalpingContext(
-                minute_df=mdf,
-                volume_power=vp,
-                orderbook_ratio=ob_ratio,
-                scanner_score=best.score,
-            )
-            sig = self._scalping.analyze_scalping(ctx)
-
-            if sig.signal != Signal.BUY:
-                logger.info("[자동스캔] %s %s → 다음 후보", best.name, sig.reason)
-                continue
-
-            # ── 일봉 ATR (손절용) ──
-            scan_df = self.kis.get_ohlcv(best.code, period="D", count=30)
+            # 조건2: 일봉 기준 5일선 지지 확인
+            scan_df = self.kis.get_ohlcv(item.code, period="D", count=10)
+            ma5_support = False
             atr = 0.0
-            if scan_df is not None and len(scan_df) >= 14:
+            if scan_df is not None and len(scan_df) >= 5:
                 scan_df = self.indicators.add_all(scan_df)
-                atr_val = scan_df["atr"].iloc[-1]
-                if pd.notna(atr_val):
-                    atr = float(atr_val)
+                if "ma_short" in scan_df.columns:
+                    ma5_now = scan_df["ma_short"].iloc[-1]
+                    if pd.notna(ma5_now) and cur_price <= float(ma5_now) * 1.01:
+                        ma5_support = True
+                if "atr" in scan_df.columns:
+                    atr_val = scan_df["atr"].iloc[-1]
+                    if pd.notna(atr_val):
+                        atr = float(atr_val)
 
-            # 종목 전환
+            if not pullback_ok and not ma5_support:
+                logger.debug("[스윙매수] %s 눌림목 미도달 (현재:%s, 목표:%s, 5MA지지:%s)",
+                             item.name, "{:,}".format(cur_price),
+                             "{:,}".format(int(item.pullback_target)),
+                             ma5_support)
+                continue
+
+            # ── 거래량 체크: 조정 시 거래량 적어야 건강한 눌림 ──
+            if scan_df is not None and len(scan_df) >= 3:
+                today_vol = float(scan_df["volume"].iloc[-1]) if "volume" in scan_df.columns else 0
+                prev_vol = float(scan_df["volume"].iloc[-2]) if "volume" in scan_df.columns else 1
+                if prev_vol > 0 and today_vol > prev_vol * 1.5:
+                    logger.info("[스윙매수] %s 거래량 급증 중 (%.0fx) → 투매 가능 → 스킵",
+                                item.name, today_vol / prev_vol)
+                    continue
+
+            # ── 체결강도 체크 ──
+            vp = self.kis.get_volume_power(item.code)
+            if vp < 70:
+                logger.info("[스윙매수] %s 체결강도 약세 (%.0f%%) → 스킵", item.name, vp)
+                continue
+
+            # ── 매수 실행 ──
+            reason_parts = []
+            if pullback_ok:
+                reason_parts.append("눌림목(목표%s원도달)" % "{:,}".format(int(item.pullback_target)))
+            if ma5_support:
+                reason_parts.append("5MA지지")
+            reason_parts.append("관심종목(%.0f점)" % item.score)
+            buy_reason = "스윙매수: %s | 원래사유: %s" % (
+                " + ".join(reason_parts), ", ".join(item.reasons[:3]))
+
             old_code = self.stock_code
-            self.stock_code = best.code
-            self._stock_name = best.name
+            self.stock_code = item.code
+            self._stock_name = item.name
             self._supply_cache = None
             self._supply_cache_time = 0
 
-            scan_reason = "스캐너(%.0f점: %s) + %s" % (
-                best.score, ", ".join(best.reasons[:3]), sig.reason)
+            logger.info("[스윙매수] %s %s 매수 시도 (현재:%s원, 관심종목종가:%s원, %+.1f%%)",
+                        item.code, item.name,
+                        "{:,}".format(cur_price),
+                        "{:,}".format(item.close),
+                        (cur_price - item.close) / item.close * 100)
 
-            logger.info("[자동스캔] %s %s 매수 시도 (사유: %s)", best.code, best.name, scan_reason)
-            if self._buy(scan_reason, current_atr=atr, confidence=sig.confidence):
+            if self._buy(buy_reason, current_atr=atr, confidence=0.6):
                 try:
                     self.telegram.send(
-                        "<b>📡 스캐너 종목 선정</b>\n종목: %s %s\n점수: %.0f\n섹터: %s\n사유: %s"
-                        % (best.code, best.name, best.score,
-                           best.sector or "개별", ", ".join(best.reasons)))
-                except Exception as e:
-                    logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
+                        "<b>📈 스윙 매수</b>\n"
+                        "종목: %s %s\n"
+                        "매수가: %s원 (관심종목 종가: %s원)\n"
+                        "목표: +5%% | 손절: -3%%\n"
+                        "사유: %s"
+                        % (item.code, item.name,
+                           "{:,}".format(cur_price),
+                           "{:,}".format(item.close),
+                           buy_reason))
+                except Exception:
+                    pass
                 bought_count += 1
-                # 슬롯 다 찼으면 종료, 아니면 계속 스캔
                 holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
-                logger.info("[자동스캔] %s 매수 완료, 보유 %d/%d — %s",
-                            best.name, holding_count, self.max_positions,
-                            "슬롯 풀 → 스캔 종료" if holding_count >= self.max_positions else "계속 스캔")
+                logger.info("[스윙매수] %s 매수 완료, 보유 %d/%d",
+                            item.name, holding_count, self.max_positions)
                 if holding_count >= self.max_positions:
-                    return
-                continue
+                    break
             else:
-                logger.info("[자동스캔] %s 매수 실패 (잔고 부족 가능)", best.name)
-                try:
-                    self.telegram.send(
-                        "<b>⚠️ 스캐너 매수 실패</b>\n"
-                        "종목: <code>%s %s</code>\n"
-                        "점수: %.0f점 (%+.1f%%)\n"
-                        "사유: 잔고 부족 가능\n"
-                        "신호: %s"
-                        % (best.code, self.telegram.escape(best.name),
-                           best.score, best.change_pct, scan_reason))
-                except Exception as e:
-                    logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
                 self.stock_code = old_code
 
-        if bought_count == 0:
-            logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))
-        else:
-            logger.info("[자동스캔] %d개 후보 중 %d종목 매수 완료", len(candidates), bought_count)
+        if bought_count > 0:
+            logger.info("[스윙매수] %d종목 매수 완료", bought_count)
 
     # ── 시작 ──
 
@@ -1194,17 +1215,17 @@ class StockEngine(BaseTradingEngine):
         scan_str = "자동 스캔" if self.auto_scan else "고정: %s" % self.stock_code
 
         logger.info("=" * 60)
-        strat_name = "Scalping(분봉단타)" if self.auto_scan else self.strategy.name
-        logger.info("  주식 자동매매 봇 v5 시작")
+        strat_name = "Swing(스윙2-5일)" if self.auto_scan else self.strategy.name
+        logger.info("  주식 자동매매 봇 v6 시작 (스윙 전환)")
         logger.info("  종목: %s | 전략: %s | 모드: %s", scan_str, strat_name, mode_str)
         logger.info("  투자: %.0f%% (최대 %s원) | 수수료: %.3f%%",
                      self.invest_ratio * 100, "{:,}".format(self.max_invest_krw), self.fee_rate * 100)
-        logger.info("  손절: ATR×%.1f (폴백-%.1f%%) | 익절: +%.1f%%→분할→트레일링%.1f%%",
-                     self.atr_stop_multiplier, self.stop_loss_pct,
+        logger.info("  손절: -%.1f%% (ATR×%.1f) | 익절: +%.1f%%→분할→트레일링%.1f%%",
+                     self.stop_loss_pct, self.atr_stop_multiplier,
                      self.take_profit_pct, self.trailing_pct)
-        logger.info("  보호: 3연속손실→15분쿨다운 | 일일-3%%→Kill Switch")
-        logger.info("  필터: 코스피급락 + 수급 + 체결강도 + VI + 갭")
-        logger.info("  장: 09:05관망→10:00골든→15:10청산")
+        logger.info("  보유: 최대 5거래일 | 보호: 3연속손실→쿨다운 | 일일-3%%→Kill Switch")
+        logger.info("  진입: 전일 관심종목 눌림목 매수 (종가-3%% 또는 5MA지지)")
+        logger.info("  장: 09:05관망→10:00골든→15:10관심종목스캔")
         logger.info("=" * 60)
 
         # 실전 모드: 사전점검 필수
