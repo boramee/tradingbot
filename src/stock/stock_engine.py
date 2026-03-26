@@ -919,6 +919,7 @@ class StockEngine(BaseTradingEngine):
             logger.debug("[자동스캔] 스캐너 후보 없음")
             return
 
+        bought_count = 0
         for i, best in enumerate(candidates):
             logger.info("[자동스캔] 후보 %d/%d: %s %s (%.0f점, %+.1f%%)",
                         i + 1, len(candidates), best.code, best.name, best.score, best.change_pct)
@@ -1003,6 +1004,7 @@ class StockEngine(BaseTradingEngine):
                            best.sector or "개별", ", ".join(best.reasons)))
                 except Exception as e:
                     logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
+                bought_count += 1
                 # 슬롯 다 찼으면 종료, 아니면 계속 스캔
                 holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
                 logger.info("[자동스캔] %s 매수 완료, 보유 %d/%d — %s",
@@ -1026,7 +1028,10 @@ class StockEngine(BaseTradingEngine):
                     logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
                 self.stock_code = old_code
 
-        logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))
+        if bought_count == 0:
+            logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))
+        else:
+            logger.info("[자동스캔] %d개 후보 중 %d종목 매수 완료", len(candidates), bought_count)
 
     # ── 시작 ──
 
