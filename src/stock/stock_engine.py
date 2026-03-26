@@ -670,8 +670,71 @@ class StockEngine(BaseTradingEngine):
                 self._last_sell_time = now
                 self._last_sell_profitable = pnl_before > 0
 
+    def _check_entry_timing(self, code: str, name: str, current_price: int) -> tuple:
+        """분봉 기반 진입 타이밍 검증.
+
+        세 가지 중 하나라도 통과하면 매수 허용:
+        1. 눌림목 진입: 급등 후 조정 중 지지선 근처에서 반등
+        2. 장 초반 갭업 돌파: 09:05~09:30 전일 고가 돌파
+        3. N분봉 고가 돌파: 최근 고가를 갱신하며 상승 중
+        """
+        mdf = self.kis.get_minute_ohlcv(code)
+        if mdf is None or len(mdf) < 5:
+            # 분봉 데이터 없으면 통과 (API 실패 시 기존 로직 유지)
+            return True, "분봉없음(패스)"
+
+        now_t = datetime.datetime.now().time()
+        highs = mdf["high"].values
+        lows = mdf["low"].values
+        closes = mdf["close"].values
+        latest_close = int(closes[-1])
+
+        # ── 1. 눌림목 진입 ──
+        # 분봉 고점 대비 2~5% 조정 후 반등 시작
+        intraday_high = int(max(highs))
+        intraday_low = int(min(lows[-5:]))  # 최근 5봉 저가
+        if intraday_high > 0:
+            drop_from_high = (intraday_high - intraday_low) / intraday_high * 100
+            recover_from_low = (latest_close - intraday_low) / intraday_low * 100 if intraday_low > 0 else 0
+
+            # 고점 대비 2~8% 빠졌다가, 저점 대비 1%+ 반등 중
+            if 2.0 <= drop_from_high <= 8.0 and recover_from_low >= 1.0:
+                # 최근 3봉이 상승 추세인지 확인
+                if len(closes) >= 3 and closes[-1] > closes[-2] >= closes[-3]:
+                    return True, "눌림목반등(고점대비-%.1f%%→+%.1f%%)" % (drop_from_high, recover_from_low)
+
+        # ── 2. 장 초반 갭업 돌파 (09:05~09:30) ──
+        if datetime.time(9, 5) <= now_t <= datetime.time(9, 30):
+            # 전일 고가 = 일봉 데이터에서 가져오기
+            daily = self.kis.get_ohlcv(code, period="D", count=3)
+            if daily is not None and len(daily) >= 2:
+                prev_high = int(daily["high"].iloc[-2])
+                if latest_close > prev_high:
+                    gap_pct = (latest_close - prev_high) / prev_high * 100
+                    if gap_pct <= 10:  # 너무 큰 갭은 위험
+                        return True, "장초반갭업돌파(전일고가%d→현재%d)" % (prev_high, latest_close)
+
+        # ── 3. N분봉 고가 돌파 ──
+        # 최근 10봉 고가를 현재가가 돌파하면서 거래량도 증가
+        if len(mdf) >= 10:
+            recent_high = int(max(highs[-10:-1]))  # 직전 9봉 고가
+            recent_avg_vol = mdf["volume"].iloc[-10:-1].mean()
+            latest_vol = int(mdf["volume"].iloc[-1])
+
+            if latest_close > recent_high and latest_vol > recent_avg_vol * 1.2:
+                return True, "분봉돌파(직전고가%d<현재%d,거래량%.1fx)" % (
+                    recent_high, latest_close,
+                    latest_vol / recent_avg_vol if recent_avg_vol > 0 else 0)
+
+        # 모두 미충족
+        drop_info = ""
+        if intraday_high > 0:
+            pos_pct = (latest_close - intraday_low) / (intraday_high - intraday_low) * 100 if intraday_high != intraday_low else 100
+            drop_info = "고점대비%.1f%%위치" % (100 - pos_pct) if pos_pct < 100 else "고점"
+        return False, "꼭대기매수방지(%s)" % (drop_info or "분석불가")
+
     def _run_auto_scan(self, now: float, df, price: int):
-        """자동 스캔: 스캐너 → 필터 → 전략 → 매수 (상위 5개 순회)"""
+        """자동 스캔: 스캐너 → 필터 → 전략 → 매수 (상위 10개 순회)"""
         ok, reason = self._pre_buy_checks(now, df, price)
         if not ok:
             logger.debug("[자동스캔] 매수 필터 차단: %s", reason)
@@ -720,6 +783,12 @@ class StockEngine(BaseTradingEngine):
                 logger.info("[자동스캔] %s %s → 스킵", best.name, gap)
                 continue
 
+            # ── 분봉 기반 진입 타이밍 검증 ──
+            entry_ok, entry_reason = self._check_entry_timing(best.code, best.name, scan_price)
+            if not entry_ok:
+                logger.info("[자동스캔] %s 진입타이밍 부적합 (%s) → 다음 후보", best.name, entry_reason)
+                continue
+
             # 종목 전환
             old_code = self.stock_code
             self.stock_code = best.code
@@ -728,7 +797,8 @@ class StockEngine(BaseTradingEngine):
             self._supply_cache_time = 0
 
             atr = float(scan_df["atr"].iloc[-1]) if "atr" in scan_df.columns and pd.notna(scan_df["atr"].iloc[-1]) else 0
-            scan_reason = "스캐너(%.0f점: %s) + %s" % (best.score, ", ".join(best.reasons[:3]), sig.reason)
+            scan_reason = "스캐너(%.0f점: %s) + %s | 진입:%s" % (
+                best.score, ", ".join(best.reasons[:3]), sig.reason, entry_reason)
 
             logger.info("[자동스캔] %s %s 매수 시도 (사유: %s)", best.code, best.name, scan_reason)
             if self._buy(scan_reason, current_atr=atr):
