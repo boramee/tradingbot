@@ -161,6 +161,11 @@ class TraderEngine(BaseTradingEngine):
         # v6: 포트폴리오 열지수 (글로벌 노출도 관리)
         self._portfolio_heat = PortfolioHeat(max_exposure_pct=70.0)
 
+        # v7: BTC 시장 레짐 필터 (200 EMA)
+        self._btc_regime_cache: Optional[Dict] = None
+        self._btc_regime_update: float = 0
+        self._btc_regime_interval = 600  # 10분마다 갱신
+
     def _make_strategy(self, name: str) -> BaseStrategy:
         cls = STRATEGY_MAP.get(name.lower(), CombinedStrategy)
         return cls()
@@ -472,8 +477,9 @@ class TraderEngine(BaseTradingEngine):
             logger.debug("[쿨다운] %d분 남음 (연속%d손실)", remaining, self._consecutive_losses)
             return
 
-        # 전략 분석
-        sig = self.strategy.analyze(df)
+        # v7: 리페인팅 방지 — 마지막 미확정 캔들 제외, 확정 캔들만 전략에 전달
+        df_confirmed = df.iloc[:-1]
+        sig = self.strategy.analyze(df_confirmed)
         self._log_status(current_price, sig, is_holding, df)
 
         if not sig.is_actionable:
@@ -499,6 +505,19 @@ class TraderEngine(BaseTradingEngine):
                 price_diff = abs(current_price - self._last_buy_price) / self._last_buy_price * 100
                 if price_diff < 1.0:
                     logger.debug("[대기] 직전 매수가 근처 (%.1f%% 차이)", price_diff)
+                    return
+
+            # v7: BTC 시장 레짐 필터 (200 EMA) — 알트코인만 차단
+            if self.ticker != "KRW-BTC":
+                btc_regime = self._check_btc_regime()
+                if not btc_regime["is_bull"]:
+                    self._alert_once(
+                        "btc_regime",
+                        "<b>🐻 BTC 하락장 감지</b>\n"
+                        "%s\n알트코인 매수를 중단합니다." % btc_regime["reason"],
+                        cooldown_sec=3600,
+                    )
+                    logger.info("[BTC레짐] 하락장 → 매수 차단: %s", btc_regime["reason"])
                     return
 
             # BTC 상관관계 체크 (알트코인만)
@@ -591,6 +610,49 @@ class TraderEngine(BaseTradingEngine):
             logger.debug("[호가필터] 조회 실패: %s", e)
             return 0.5  # 실패 시 중립
 
+    def _check_btc_regime(self) -> Dict:
+        """v7: BTC 200 EMA 기반 시장 레짐 필터.
+
+        Returns:
+            {"is_bull": bool, "price": float, "ema200": float, "reason": str}
+        """
+        now = time.time()
+        if self._btc_regime_cache and now - self._btc_regime_update < self._btc_regime_interval:
+            return self._btc_regime_cache
+
+        result = {"is_bull": True, "price": 0, "ema200": 0, "reason": ""}
+        try:
+            df_btc = pyupbit.get_ohlcv("KRW-BTC", interval="minute60", count=500)
+            if df_btc is None or len(df_btc) < 200:
+                logger.debug("[BTC레짐] 데이터 부족 → 통과 처리")
+                self._btc_regime_cache = result
+                self._btc_regime_update = now
+                return result
+
+            df_btc.columns = ["open", "high", "low", "close", "volume", "value"]
+            # 확정 캔들만 사용 (마지막 미확정 캔들 제외)
+            df_confirmed = df_btc.iloc[:-1]
+            ema200 = df_confirmed["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+            btc_price = float(df_confirmed["close"].iloc[-1])
+
+            is_bull = btc_price > ema200
+            pct_diff = (btc_price - ema200) / ema200 * 100
+
+            result = {
+                "is_bull": is_bull,
+                "price": btc_price,
+                "ema200": float(ema200),
+                "reason": "BTC %.0f %s 200EMA %.0f (%+.1f%%)" % (
+                    btc_price, ">" if is_bull else "<", ema200, pct_diff),
+            }
+            logger.debug("[BTC레짐] %s", result["reason"])
+        except Exception as e:
+            logger.debug("[BTC레짐] 조회 실패: %s → 통과 처리", e)
+
+        self._btc_regime_cache = result
+        self._btc_regime_update = now
+        return result
+
     def _update_higher_timeframe(self):
         """상위 타임프레임 추세를 주기적으로 갱신"""
         now = time.time()
@@ -658,6 +720,7 @@ class TraderEngine(BaseTradingEngine):
         logger.info("  보호: 연속%d손실→%d분쿨다운 | 일일-%.0f%%→당일매매중단",
                      self._max_consecutive_losses, self._cooldown_minutes,
                      self.kill_switch.max_daily_loss_pct)
+        logger.info("  v7: 리페인팅 방지(확정캔들) + BTC 200EMA 레짐필터")
         logger.info("  기록: logs/trades.csv")
         mode = "실거래" if self._upbit else "시뮬레이션"
         logger.info("  주기: %d초 | API: %s", poll_sec, mode)

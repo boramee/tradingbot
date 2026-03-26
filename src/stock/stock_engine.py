@@ -154,8 +154,6 @@ class StockEngine(BaseTradingEngine):
         self._supply_cache_time: float = 0
         self._index_cache = None
         self._index_cache_time: float = 0
-        self._market_filter_cache: dict = {}  # 시장 국면 필터 캐시
-        self._market_filter_time: float = 0
         self._last_report_date = ""
         self._today_open_price: Dict[str, float] = {}
         self._last_block_reason: str = ""
@@ -204,44 +202,11 @@ class StockEngine(BaseTradingEngine):
         if now - self._index_cache_time > 60:
             self._index_cache = self.kis.get_index_price("0001")
             self._index_cache_time = now
-
-        # 1. 코스피 급락 체크
         if self._index_cache:
             idx_change = self._index_cache.get("change_pct", 0)
             if idx_change <= -3.0:
                 return False, "코스피 급락 (%.1f%%)" % idx_change
-
-        # 2. VKOSPI 공포지수 체크 (25 이상 = 패닉)
-        sent = self.sentiment.analyze()
-        if sent.vkospi >= 25:
-            return False, "VKOSPI 공포 (%.1f)" % sent.vkospi
-
-        # 3. 코스피 20일선 체크 (30분마다 갱신)
-        if now - self._market_filter_time > 1800:
-            self._market_filter_cache = self._check_index_ma20()
-            self._market_filter_time = now
-        if self._market_filter_cache.get("below_ma20"):
-            return False, "코스피 20일선 하회 (지수:%.0f < 20MA:%.0f)" % (
-                self._market_filter_cache.get("price", 0),
-                self._market_filter_cache.get("ma20", 0))
-
         return True, ""
-
-    def _check_index_ma20(self) -> dict:
-        """KODEX 200(069500) 일봉으로 코스피 20일선 상태 판단"""
-        try:
-            df = self.kis.get_ohlcv("069500", period="D", count=25)
-            if df is None or len(df) < 20:
-                return {}
-            ma20 = float(df["close"].iloc[-20:].mean())
-            cur_price = float(df["close"].iloc[-1])
-            below = cur_price < ma20
-            if below:
-                logger.info("[MarketFilter] 코스피 20일선 하회: KODEX200 %.0f < MA20 %.0f", cur_price, ma20)
-            return {"below_ma20": below, "price": cur_price, "ma20": ma20}
-        except Exception as e:
-            logger.warning("[MarketFilter] KODEX200 20일선 조회 실패: %s", e)
-            return {}
 
     def _check_supply_demand(self) -> tuple:
         now = time.time()
@@ -557,21 +522,14 @@ class StockEngine(BaseTradingEngine):
         if self._daily_trades >= self._max_daily_trades:
             return False, "일일 거래 한도"
 
-        # 코스피 급락 (최초 1회만 알림, 회복 후 재발생 시 다시 알림)
+        # 코스피 급락 (같은 사유 5분에 1번만 알림)
         mkt_ok, mkt_reason = self._check_market_conditions()
         if not mkt_ok:
-            if not self._last_block_reason.startswith("코스피"):
-                try:
-                    self.telegram.send("<b>🚫 매수 차단</b>\n사유: %s" % mkt_reason)
-                except Exception:
-                    pass
-            self._last_block_reason = mkt_reason
-            self._last_block_time = now
+            if mkt_reason != self._last_block_reason or (now - self._last_block_time) > 300:
+                self.telegram.send("<b>🚫 매수 차단</b>\n사유: %s" % mkt_reason)
+                self._last_block_reason = mkt_reason
+                self._last_block_time = now
             return False, mkt_reason
-        else:
-            # 코스피 회복 시 차단 사유 초기화
-            if self._last_block_reason.startswith("코스피"):
-                self._last_block_reason = ""
 
         # VI 근처
         if price > 0 and self._check_vi_risk(price):
@@ -917,12 +875,6 @@ class StockEngine(BaseTradingEngine):
 
     def _save_watchlist_for_tomorrow(self, today: str):
         """장 마감 전: 스캐너로 내일 관심종목 저장"""
-        # 하락장이면 스캔 자체 스킵 (안 좋은 종목 담지 않음)
-        mkt_ok, mkt_reason = self._check_market_conditions()
-        if not mkt_ok:
-            logger.info("[스윙] 하락장 (%s) → 관심종목 스캔 스킵", mkt_reason)
-            return
-
         logger.info("[스윙] 관심종목 스캔 시작 (내일 매수 후보)")
         candidates = self.scanner.get_candidates(limit=10)
         if not candidates:
@@ -933,12 +885,6 @@ class StockEngine(BaseTradingEngine):
         for best in candidates:
             # 급등주 제외 (너무 많이 오른 건 조정폭도 큼)
             if best.change_pct >= 15 or best.change_pct < 2:
-                continue
-
-            # 최소 거래대금 100억 이상 (소형 잡주 제외)
-            if best.trade_value < 10_000_000_000:
-                logger.debug("[스윙] %s 거래대금 부족 (%s억) → 제외",
-                             best.name, "{:,.0f}".format(best.trade_value / 100_000_000))
                 continue
 
             # 일봉 데이터로 이평선 계산
@@ -1050,15 +996,12 @@ class StockEngine(BaseTradingEngine):
                              ma5_support)
                 continue
 
-            # ── 거래량 체크: 음봉+거래량 급증=투매, 양봉+거래량 급증=매수세 ──
+            # ── 거래량 체크: 조정 시 거래량 적어야 건강한 눌림 ──
             if scan_df is not None and len(scan_df) >= 3:
                 today_vol = float(scan_df["volume"].iloc[-1]) if "volume" in scan_df.columns else 0
                 prev_vol = float(scan_df["volume"].iloc[-2]) if "volume" in scan_df.columns else 1
-                today_close = float(scan_df["close"].iloc[-1])
-                today_open = float(scan_df["open"].iloc[-1])
-                is_bearish = today_close < today_open
-                if prev_vol > 0 and today_vol > prev_vol * 1.5 and is_bearish:
-                    logger.info("[스윙매수] %s 음봉+거래량 급증 (%.0fx) → 투매 가능 → 스킵",
+                if prev_vol > 0 and today_vol > prev_vol * 1.5:
+                    logger.info("[스윙매수] %s 거래량 급증 중 (%.0fx) → 투매 가능 → 스킵",
                                 item.name, today_vol / prev_vol)
                     continue
 
@@ -1068,47 +1011,17 @@ class StockEngine(BaseTradingEngine):
                 logger.info("[스윙매수] %s 체결강도 약세 (%.0f%%) → 스킵", item.name, vp)
                 continue
 
-            # ── 분봉 반등 확인 (양봉 2개 + 거래량 + VWAP 탈환) ──
-            mdf = self.kis.get_minute_ohlcv(item.code)
-            vwap_ok = False
-            if mdf is not None and len(mdf) >= 3:
-                c1 = mdf.iloc[-2]
-                c2 = mdf.iloc[-1]
-                bull1 = float(c1["close"]) > float(c1["open"])
-                bull2 = float(c2["close"]) > float(c2["open"])
-                vol_ok = float(c2["volume"]) > float(c1["volume"]) * 0.8
-                if not (bull1 and bull2 and vol_ok):
-                    logger.debug("[스윙매수] %s 반등 미확인 (양봉:%s/%s 거래량:%s) → 대기",
-                                 item.name, bull1, bull2, vol_ok)
-                    continue
-
-                # VWAP 계산: 현재가가 VWAP 위에 있으면 매수세 우위
-                tp = (mdf["high"].astype(float) + mdf["low"].astype(float) + mdf["close"].astype(float)) / 3
-                vol = mdf["volume"].astype(float)
-                cum_vol = vol.cumsum()
-                if cum_vol.iloc[-1] > 0:
-                    vwap = float((tp * vol).cumsum().iloc[-1] / cum_vol.iloc[-1])
-                    latest = float(c2["close"])
-                    vwap_ok = latest >= vwap
-                    if not vwap_ok:
-                        logger.debug("[스윙매수] %s VWAP 하회 (현재:%s < VWAP:%s) → 대기",
-                                     item.name, "{:,}".format(int(latest)), "{:,}".format(int(vwap)))
-                        continue
-
             # ── 매수 실행 ──
             reason_parts = []
             if pullback_ok:
                 reason_parts.append("눌림목(목표%s원도달)" % "{:,}".format(int(item.pullback_target)))
             if ma5_support:
                 reason_parts.append("5MA지지")
-            if vwap_ok:
-                reason_parts.append("VWAP탈환")
             reason_parts.append("관심종목(%.0f점)" % item.score)
             buy_reason = "스윙매수: %s | 원래사유: %s" % (
                 " + ".join(reason_parts), ", ".join(item.reasons[:3]))
 
             old_code = self.stock_code
-            old_name = self._stock_name
             self.stock_code = item.code
             self._stock_name = item.name
             self._supply_cache = None
@@ -1142,7 +1055,6 @@ class StockEngine(BaseTradingEngine):
                     break
             else:
                 self.stock_code = old_code
-                self._stock_name = old_name
 
         if bought_count > 0:
             logger.info("[스윙매수] %d종목 매수 완료", bought_count)
@@ -1313,7 +1225,6 @@ class StockEngine(BaseTradingEngine):
                      self.take_profit_pct, self.trailing_pct)
         logger.info("  보유: 최대 5거래일 | 보호: 3연속손실→쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  진입: 전일 관심종목 눌림목 매수 (종가-3%% 또는 5MA지지)")
-        logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 하회 차단")
         logger.info("  장: 09:05관망→10:00골든→15:10관심종목스캔")
         logger.info("=" * 60)
 
@@ -1326,18 +1237,6 @@ class StockEngine(BaseTradingEngine):
             self.preflight_check()
 
         self.telegram.notify_start(scan_str, "주식 %s" % self.strategy.name, mode_str)
-
-        # 시작 시 관심종목 없으면 즉시 스캔 (장 마감 후 시작 대비)
-        if self.auto_scan and self.kis.is_authenticated:
-            today = datetime.date.today().isoformat()
-            active = self.watchlist.get_active(today)
-            if not active and self._watchlist_saved_today != today:
-                logger.info("[시작] 관심종목 없음 → 즉시 스캔")
-                try:
-                    self._save_watchlist_for_tomorrow(today)
-                    self._watchlist_saved_today = today
-                except Exception as e:
-                    logger.warning("[시작] 관심종목 스캔 실패: %s", e)
 
         while self.running:
             try:
@@ -1417,6 +1316,8 @@ class StockEngine(BaseTradingEngine):
         if now - self._last_offhour_heartbeat < 10800:  # 3h
             return
         self._last_offhour_heartbeat = now
+        hour = datetime.datetime.now().strftime("%H:%M")
+        self.telegram.send("💤 주식봇 대기 중 (%s)" % hour)
         logger.info("[대기 중] 장외 시간 — 봇 정상 작동")
 
     def _send_daily_report_if_needed(self):
