@@ -622,7 +622,7 @@ class TraderEngine(BaseTradingEngine):
 
         result = {"is_bull": True, "price": 0, "ema200": 0, "reason": ""}
         try:
-            df_btc = pyupbit.get_ohlcv("KRW-BTC", interval="minute60", count=210)
+            df_btc = pyupbit.get_ohlcv("KRW-BTC", interval="minute60", count=500)
             if df_btc is None or len(df_btc) < 200:
                 logger.debug("[BTC레짐] 데이터 부족 → 통과 처리")
                 self._btc_regime_cache = result
