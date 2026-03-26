@@ -191,6 +191,11 @@ class StockScanner:
                 skip_low_value += 1
                 continue
 
+            # 저가주 제외 (호가 단위 대비 변동성 과대)
+            if item.get("price", 0) < 1000:
+                skip_low_value += 1
+                continue
+
             # 기본 필터: 거래대금 30억+ 또는 등락률 1.0%+
             if trade_val < MIN_TRADE_VALUE and change_pct < MIN_CHANGE_PCT:
                 skip_low_value += 1

@@ -113,13 +113,16 @@ class BaseTradingEngine:
             if current_price <= protect_price:
                 return True
 
-        # ATR 기반 손절
+        # ATR 기반 손절 (고정% 상한 적용)
+        pnl = self.calc_pnl(avg_price, current_price)
         if entry_atr > 0:
             stop_price = avg_price - entry_atr * self.atr_stop_multiplier
+            # ATR 손절이 너무 느슨하면 고정% 손절로 보호
+            max_loss_price = avg_price * (1 - self.stop_loss_pct * 1.5 / 100)
+            stop_price = max(stop_price, max_loss_price)
             return current_price <= stop_price
 
         # 폴백: 고정 %
-        pnl = self.calc_pnl(avg_price, current_price)
         return pnl <= -self.stop_loss_pct
 
     def get_stop_loss_detail(
