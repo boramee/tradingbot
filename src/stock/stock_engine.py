@@ -465,6 +465,8 @@ class StockEngine(BaseTradingEngine):
                 self.position.partial_sold = True
             else:
                 self.kill_switch.record_trade(pnl_amount)
+                # 매도 종목 재매수 방지
+                self.scanner.exclude(self.stock_code)
                 # v4: 공통 승률 추적 + 쿨다운 로직
                 self.record_trade_result(pnl_pct)
                 if self._consecutive_losses >= self._max_consecutive_losses:
