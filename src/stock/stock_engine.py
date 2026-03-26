@@ -1315,6 +1315,18 @@ class StockEngine(BaseTradingEngine):
 
         self.telegram.notify_start(scan_str, "주식 %s" % self.strategy.name, mode_str)
 
+        # 시작 시 관심종목 없으면 즉시 스캔 (장 마감 후 시작 대비)
+        if self.auto_scan and self.kis.is_authenticated:
+            today = datetime.date.today().isoformat()
+            active = self.watchlist.get_active(today)
+            if not active and self._watchlist_saved_today != today:
+                logger.info("[시작] 관심종목 없음 → 즉시 스캔")
+                try:
+                    self._save_watchlist_for_tomorrow(today)
+                    self._watchlist_saved_today = today
+                except Exception as e:
+                    logger.warning("[시작] 관심종목 스캔 실패: %s", e)
+
         while self.running:
             try:
                 if self.is_market_open():
