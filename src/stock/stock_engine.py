@@ -522,17 +522,21 @@ class StockEngine(BaseTradingEngine):
         if self._daily_trades >= self._max_daily_trades:
             return False, "일일 거래 한도"
 
-        # 코스피 급락 (같은 사유 30분에 1번만 알림)
+        # 코스피 급락 (최초 1회만 알림, 회복 후 재발생 시 다시 알림)
         mkt_ok, mkt_reason = self._check_market_conditions()
         if not mkt_ok:
-            if mkt_reason != self._last_block_reason or (now - self._last_block_time) > 1800:
+            if not self._last_block_reason.startswith("코스피"):
                 try:
                     self.telegram.send("<b>🚫 매수 차단</b>\n사유: %s" % mkt_reason)
                 except Exception:
                     pass
-                self._last_block_reason = mkt_reason
-                self._last_block_time = now
+            self._last_block_reason = mkt_reason
+            self._last_block_time = now
             return False, mkt_reason
+        else:
+            # 코스피 회복 시 차단 사유 초기화
+            if self._last_block_reason.startswith("코스피"):
+                self._last_block_reason = ""
 
         # VI 근처
         if price > 0 and self._check_vi_risk(price):
