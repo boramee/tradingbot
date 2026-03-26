@@ -1053,6 +1053,19 @@ class StockEngine(BaseTradingEngine):
                 logger.info("[스윙매수] %s 체결강도 약세 (%.0f%%) → 스킵", item.name, vp)
                 continue
 
+            # ── 분봉 반등 확인 (양봉 2개 연속 + 거래량 유지) ──
+            mdf = self.kis.get_minute_ohlcv(item.code)
+            if mdf is not None and len(mdf) >= 3:
+                c1 = mdf.iloc[-2]  # 직전 봉
+                c2 = mdf.iloc[-1]  # 최신 봉
+                bull1 = float(c1["close"]) > float(c1["open"])
+                bull2 = float(c2["close"]) > float(c2["open"])
+                vol_ok = float(c2["volume"]) > float(c1["volume"]) * 0.8
+                if not (bull1 and bull2 and vol_ok):
+                    logger.debug("[스윙매수] %s 반등 미확인 (양봉:%s/%s 거래량:%s) → 대기",
+                                 item.name, bull1, bull2, vol_ok)
+                    continue
+
             # ── 매수 실행 ──
             reason_parts = []
             if pullback_ok:
