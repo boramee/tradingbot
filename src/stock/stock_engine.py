@@ -366,14 +366,17 @@ class StockEngine(BaseTradingEngine):
                 self._market_summary() or "N/A",
             )
 
-            self.telegram.send(
-                "<b>🟢 매수</b>\n"
-                "종목: <code>%s %s</code>\n"
-                "가격: %s원 × %d주 = %s원\n\n%s"
-                % (self.stock_code, self.telegram.escape(self._stock_name),
-                   "{:,}".format(price), qty, "{:,}".format(qty * price),
-                   outlook)
-            )
+            try:
+                self.telegram.send(
+                    "<b>🟢 매수</b>\n"
+                    "종목: <code>%s %s</code>\n"
+                    "가격: %s원 × %d주 = %s원\n\n%s"
+                    % (self.stock_code, self.telegram.escape(self._stock_name),
+                       "{:,}".format(price), qty, "{:,}".format(qty * price),
+                       outlook)
+                )
+            except Exception as e:
+                logger.warning("[매수] 텔레그램 전송 실패: %s", e)
             self.trade_logger.log(
                 bot="stock_trader", side="BUY", symbol=self.stock_code,
                 exchange="KIS", price=price, quantity=qty, amount=qty * price,
@@ -382,7 +385,10 @@ class StockEngine(BaseTradingEngine):
         else:
             error = result.get("error", "") if result else "알 수 없음"
             logger.error("[매수 실패] %s: %s", self.stock_code, error)
-            self.telegram.notify_error("매수 실패: %s\n%s" % (error, self.stock_code))
+            try:
+                self.telegram.notify_error("매수 실패: %s\n%s" % (error, self.stock_code))
+            except Exception:
+                pass
         return False
 
     def _sell(self, reason: str, partial: bool = False) -> bool:
@@ -797,7 +803,10 @@ class StockEngine(BaseTradingEngine):
             # 손절
             if self.check_stop_loss(pos.avg_price, cur_price, pos.entry_atr, pos.partial_stage):
                 detail = self.get_stop_loss_detail(pos.avg_price, cur_price, pos.entry_atr, pos.partial_stage)
-                self.telegram.notify_stop_loss(label, cur_price, abs(pnl_pct))
+                try:
+                    self.telegram.notify_stop_loss(label, cur_price, abs(pnl_pct))
+                except Exception:
+                    pass
                 self._sell(detail)
                 sold = True
 
@@ -817,9 +826,41 @@ class StockEngine(BaseTradingEngine):
             # 트레일링
             elif self.check_trailing_stop(pos.avg_price, cur_price, pos.highest_price, pos.entry_atr, pos.partial_stage):
                 detail = self.get_trailing_detail(pos.avg_price, cur_price, pos.highest_price, pos.entry_atr)
-                self.telegram.notify_take_profit(label, cur_price, pnl_pct)
+                try:
+                    self.telegram.notify_take_profit(label, cur_price, pnl_pct)
+                except Exception:
+                    pass
                 self._sell(detail)
                 sold = True
+
+            # 분봉 기반 매도 판단 (기존 손절/익절에 안 걸린 경우)
+            if not sold and mode not in ("opening_wait", "closing"):
+                now_ts = time.time()
+                last_check = getattr(pos, '_last_sell_check', 0)
+                if now_ts - last_check >= 30:  # 30초 쿨다운
+                    pos._last_sell_check = now_ts
+                    try:
+                        from src.strategies.scalping import ScalpingContext
+                        sell_mdf = self.kis.get_minute_ohlcv(code)
+                        if sell_mdf is not None and len(sell_mdf) >= 5:
+                            sell_vp = self.kis.get_volume_power(code)
+                            sell_ob = self.kis.get_orderbook_ratio(code)
+                            sell_ob_ratio = sell_ob["bid_ask_ratio"] if sell_ob else 1.0
+                            sell_ctx = ScalpingContext(
+                                minute_df=sell_mdf,
+                                volume_power=sell_vp,
+                                orderbook_ratio=sell_ob_ratio,
+                            )
+                            sell_sig = self._scalping.analyze_sell(sell_ctx, pnl_pct)
+                            if sell_sig.signal == Signal.SELL:
+                                logger.info("[분봉매도] %s %s (PnL:%+.1f%%, 신뢰도:%.0f%%)",
+                                            label, sell_sig.reason, pnl_pct, sell_sig.confidence * 100)
+                                self._sell(sell_sig.reason)
+                                sold = True
+                            else:
+                                logger.debug("[분봉매도] %s 홀딩 (%s)", label, sell_sig.reason)
+                    except Exception as e:
+                        logger.warning("[분봉매도] %s 분석 실패: %s", label, e)
 
             # 장마감 청산
             if not sold and mode == "closing":
@@ -943,25 +984,34 @@ class StockEngine(BaseTradingEngine):
             logger.info("[자동스캔] %s %s 매수 시도 (사유: %s)", best.code, best.name, scan_reason)
             if self._buy(scan_reason, current_atr=atr, confidence=sig.confidence):
                 self.scanner.exclude(best.code)
-                self.telegram.send(
-                    "<b>📡 스캐너 종목 선정</b>\n종목: %s %s\n점수: %.0f\n섹터: %s\n사유: %s"
-                    % (best.code, best.name, best.score,
-                       best.sector or "개별", ", ".join(best.reasons)))
+                try:
+                    self.telegram.send(
+                        "<b>📡 스캐너 종목 선정</b>\n종목: %s %s\n점수: %.0f\n섹터: %s\n사유: %s"
+                        % (best.code, best.name, best.score,
+                           best.sector or "개별", ", ".join(best.reasons)))
+                except Exception as e:
+                    logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
                 # 슬롯 다 찼으면 종료, 아니면 계속 스캔
                 holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
+                logger.info("[자동스캔] %s 매수 완료, 보유 %d/%d — %s",
+                            best.name, holding_count, self.max_positions,
+                            "슬롯 풀 → 스캔 종료" if holding_count >= self.max_positions else "계속 스캔")
                 if holding_count >= self.max_positions:
                     return
                 continue
             else:
                 logger.info("[자동스캔] %s 매수 실패 (잔고 부족 가능)", best.name)
-                self.telegram.send(
-                    "<b>⚠️ 스캐너 매수 실패</b>\n"
-                    "종목: <code>%s %s</code>\n"
-                    "점수: %.0f점 (%+.1f%%)\n"
-                    "사유: 잔고 부족 가능\n"
-                    "신호: %s"
-                    % (best.code, self.telegram.escape(best.name),
-                       best.score, best.change_pct, scan_reason))
+                try:
+                    self.telegram.send(
+                        "<b>⚠️ 스캐너 매수 실패</b>\n"
+                        "종목: <code>%s %s</code>\n"
+                        "점수: %.0f점 (%+.1f%%)\n"
+                        "사유: 잔고 부족 가능\n"
+                        "신호: %s"
+                        % (best.code, self.telegram.escape(best.name),
+                           best.score, best.change_pct, scan_reason))
+                except Exception as e:
+                    logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
                 self.stock_code = old_code
 
         logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))

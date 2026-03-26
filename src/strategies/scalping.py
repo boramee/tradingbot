@@ -166,6 +166,100 @@ class ScalpingStrategy(BaseStrategy):
 
         return TradeSignal(Signal.HOLD, conf, "분봉관망: %s" % tag, price)
 
+    def analyze_sell(self, ctx: ScalpingContext, pnl_pct: float = 0.0) -> TradeSignal:
+        """분봉 데이터 기반 매도 판단.
+
+        기존 손절/익절은 수익률만 보지만, 이 메서드는 실시간 시장 상태를 본다.
+        점수 0.5 이상이면 매도 신호.
+
+        Args:
+            ctx: 분봉 + 실시간 데이터
+            pnl_pct: 현재 수익률 (%). 손실 중이면 더 민감하게 반응.
+        """
+        mdf = ctx.minute_df
+        if mdf is None or len(mdf) < 5:
+            return TradeSignal(Signal.HOLD, 0, "분봉 데이터 부족(매도판단불가)", 0)
+
+        price = float(mdf["close"].iloc[-1])
+        reasons = []
+        score = 0.0
+
+        # ── 1. VWAP 이탈 (가장 강력한 매도 신호) ──
+        vwap = self._calc_vwap(mdf)
+        if vwap and vwap > 0:
+            vwap_pct = (price - vwap) / vwap * 100
+            if vwap_pct < -1.0:
+                # VWAP 크게 하회 → 강한 매도
+                score += 0.35
+                reasons.append("VWAP크게하회(%.1f%%)" % vwap_pct)
+            elif vwap_pct < -0.3:
+                score += 0.2
+                reasons.append("VWAP하회(%.1f%%)" % vwap_pct)
+            elif vwap_pct < 0:
+                score += 0.1
+                reasons.append("VWAP소폭하회(%.1f%%)" % vwap_pct)
+
+        # ── 2. 음봉 연속 (하락 추세) ──
+        bearish_count = self._count_bearish_candles(mdf)
+        if bearish_count >= 4:
+            score += 0.3
+            reasons.append("음봉%d연속" % bearish_count)
+        elif bearish_count >= 3:
+            score += 0.2
+            reasons.append("음봉%d연속" % bearish_count)
+        elif bearish_count >= 2:
+            score += 0.1
+            reasons.append("음봉%d연속" % bearish_count)
+
+        # ── 3. 체결강도 약화 (매도세 우위) ──
+        vp = ctx.volume_power
+        if vp < 60:
+            score += 0.3
+            reasons.append("체결강도매우약(%.0f%%)" % vp)
+        elif vp < 80:
+            score += 0.2
+            reasons.append("체결강도약(%.0f%%)" % vp)
+        elif vp < 90:
+            score += 0.1
+            reasons.append("체결강도부진(%.0f%%)" % vp)
+
+        # ── 4. 호가창 매도 쏠림 ──
+        ob = ctx.orderbook_ratio
+        if ob < 0.3:
+            score += 0.25
+            reasons.append("호가매도폭주(%.2f)" % ob)
+        elif ob < 0.5:
+            score += 0.15
+            reasons.append("호가매도쏠림(%.2f)" % ob)
+
+        # ── 5. 분봉 거래량 급감 (관심 이탈) ──
+        vol_ratio = self._check_volume_surge(mdf)
+        if vol_ratio < 0.3:
+            score += 0.1
+            reasons.append("거래량급감(%.1fx)" % vol_ratio)
+
+        # ── 6. 고점 대비 급락 ──
+        position = self._get_high_position(mdf)
+        if position is not None and position < 0.2:
+            score += 0.15
+            reasons.append("장중저점근처(%.0f%%)" % (position * 100))
+
+        # ── 손실 중이면 민감도 상향 (조기 탈출) ──
+        if pnl_pct < -0.5:
+            score *= 1.3
+            reasons.append("손실중(%+.1f%%)" % pnl_pct)
+        elif pnl_pct < 0:
+            score *= 1.15
+
+        # ── 최종 판단 ──
+        tag = " | ".join(reasons)
+        conf = max(0, min(1.0, score))
+
+        if conf >= 0.5:
+            return TradeSignal(Signal.SELL, conf, "분봉매도: %s" % tag, price)
+
+        return TradeSignal(Signal.HOLD, conf, "분봉홀딩: %s" % tag, price)
+
     # ── 헬퍼 메서드 ──
 
     @staticmethod
@@ -186,6 +280,17 @@ class ScalpingStrategy(BaseStrategy):
         count = 0
         for i in range(len(mdf) - 1, -1, -1):
             if float(mdf["close"].iloc[i]) > float(mdf["open"].iloc[i]):
+                count += 1
+            else:
+                break
+        return count
+
+    @staticmethod
+    def _count_bearish_candles(mdf: pd.DataFrame) -> int:
+        """최근 연속 음봉 수"""
+        count = 0
+        for i in range(len(mdf) - 1, -1, -1):
+            if float(mdf["close"].iloc[i]) < float(mdf["open"].iloc[i]):
                 count += 1
             else:
                 break
