@@ -467,6 +467,9 @@ class StockEngine(BaseTradingEngine):
             if partial:
                 self.position.quantity = holding["quantity"] - qty
                 self.position.partial_sold = True
+                # 멀티 포지션 동기화
+                if self.stock_code in self.positions:
+                    self.positions[self.stock_code].quantity = self.position.quantity
             else:
                 self.kill_switch.record_trade(pnl_amount)
                 # 매도 종목 재매수 방지
@@ -478,6 +481,8 @@ class StockEngine(BaseTradingEngine):
                         "<b>⏸ 쿨다운</b>\n%d연속 손실 → %d분 대기"
                         % (self._consecutive_losses, self._cooldown_minutes))
                 self.position = StockPosition(code=self.stock_code)
+                # 멀티 포지션에서 제거
+                self.positions.pop(self.stock_code, None)
             return True
         return False
 
