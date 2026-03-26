@@ -917,6 +917,12 @@ class StockEngine(BaseTradingEngine):
 
     def _save_watchlist_for_tomorrow(self, today: str):
         """장 마감 전: 스캐너로 내일 관심종목 저장"""
+        # 하락장이면 스캔 자체 스킵 (안 좋은 종목 담지 않음)
+        mkt_ok, mkt_reason = self._check_market_conditions()
+        if not mkt_ok:
+            logger.info("[스윙] 하락장 (%s) → 관심종목 스캔 스킵", mkt_reason)
+            return
+
         logger.info("[스윙] 관심종목 스캔 시작 (내일 매수 후보)")
         candidates = self.scanner.get_candidates(limit=10)
         if not candidates:
@@ -927,6 +933,12 @@ class StockEngine(BaseTradingEngine):
         for best in candidates:
             # 급등주 제외 (너무 많이 오른 건 조정폭도 큼)
             if best.change_pct >= 15 or best.change_pct < 2:
+                continue
+
+            # 최소 거래대금 100억 이상 (소형 잡주 제외)
+            if best.trade_value < 10_000_000_000:
+                logger.debug("[스윙] %s 거래대금 부족 (%s억) → 제외",
+                             best.name, "{:,.0f}".format(best.trade_value / 100_000_000))
                 continue
 
             # 일봉 데이터로 이평선 계산
