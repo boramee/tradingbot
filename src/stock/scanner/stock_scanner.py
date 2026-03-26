@@ -196,6 +196,16 @@ class StockScanner:
                 skip_low_value += 1
                 continue
 
+            # 등락률 범위 필터: +2~8%만 (초기 상승 포착, 급등 완료 제외)
+            if change_pct < 2.0:
+                skip_low_value += 1
+                continue
+            if change_pct > 8.0:
+                logger.info("[스캐너 1단계] 제외(급등완료): %s %s | %+.1f%% > 8%%",
+                            code, item.get("name", "?"), change_pct)
+                skip_low_value += 1
+                continue
+
             # 기본 필터: 거래대금 30억+ 또는 등락률 1.0%+
             if trade_val < MIN_TRADE_VALUE and change_pct < MIN_CHANGE_PCT:
                 skip_low_value += 1

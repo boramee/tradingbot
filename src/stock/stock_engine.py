@@ -202,7 +202,7 @@ class StockEngine(BaseTradingEngine):
             self._index_cache_time = now
         if self._index_cache:
             idx_change = self._index_cache.get("change_pct", 0)
-            if idx_change <= -2.5:
+            if idx_change <= -3.0:
                 return False, "코스피 급락 (%.1f%%)" % idx_change
         return True, ""
 
@@ -934,7 +934,7 @@ class StockEngine(BaseTradingEngine):
                 continue
 
             # 이미 급등한 종목 제외 (꼭대기 매수 방지)
-            if best.change_pct >= 10:
+            if best.change_pct >= 8:
                 logger.info("[자동스캔] %s 이미 급등 (%+.1f%%) → 스킵", best.name, best.change_pct)
                 continue
 
