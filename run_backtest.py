@@ -25,26 +25,53 @@ from src.backtest.backtest_engine import BacktestEngine, STRATEGY_MAP
 
 
 def fetch_stock_data(code: str, days: int = 365):
-    """한국투자증권 또는 야후파이낸스에서 주식 데이터 조회"""
+    """pykrx 우선, 실패 시 야후파이낸스(.KS)로 한국 주식 데이터 조회"""
     import pandas as pd
+    from datetime import datetime, timedelta
 
     # pykrx로 시도 (한국 주식 과거 데이터)
     try:
         from pykrx import stock as pykrx_stock
-        from datetime import datetime, timedelta
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-        df = pykrx_stock.get_market_ohlcv_by_date(start, end, code)
-        if df is not None and not df.empty:
-            df = df.iloc[:, :5]
-            df.columns = ["open", "high", "low", "close", "volume"]
-            name = pykrx_stock.get_market_ticker_name(code)
-            print("데이터: %s %s (%d일)" % (code, name, len(df)))
-            return df
-    except ImportError:
-        pass
 
-    print("pykrx 패키지 필요: pip install pykrx")
+        # 시스템 시간이 실제 거래 데이터 최신일보다 미래일 수 있어
+        # end 날짜를 뒤로 이동하며 조회를 재시도한다.
+        now = datetime.now()
+        fallback_offsets = [0, 7, 30, 90, 180, 365, 730]
+        for offset in fallback_offsets:
+            end_dt = now - timedelta(days=offset)
+            start_dt = end_dt - timedelta(days=days)
+            end = end_dt.strftime("%Y%m%d")
+            start = start_dt.strftime("%Y%m%d")
+            df = pykrx_stock.get_market_ohlcv_by_date(start, end, code)
+            if df is not None and not df.empty:
+                df = df.iloc[:, :5]
+                df.columns = ["open", "high", "low", "close", "volume"]
+                name = pykrx_stock.get_market_ticker_name(code)
+                print("데이터: %s %s (%d일, 기준일:%s)" % (code, name, len(df), end))
+                return df
+    except ImportError:
+        print("pykrx 미설치 또는 로딩 실패 → yfinance 대체 조회 시도")
+
+    # yfinance 폴백 (.KS)
+    try:
+        import yfinance as yf
+
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=days * 2)  # 휴장일 포함 여유 조회
+        ticker = yf.Ticker("%s.KS" % code)
+        df = ticker.history(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+        if df is not None and not df.empty:
+            df = df.rename(columns={
+                "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume",
+            })
+            df = df[["open", "high", "low", "close", "volume"]].tail(days)
+            print("데이터: %s (%s, yfinance, %d일)" % (code, "%s.KS" % code, len(df)))
+            return df
+    except Exception as e:
+        print("yfinance 조회 실패: %s" % e)
+
+    print("주식 데이터 조회 실패 (pykrx/yfinance 모두 실패)")
     return None
 
 
