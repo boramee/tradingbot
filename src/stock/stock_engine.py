@@ -1390,8 +1390,6 @@ class StockEngine(BaseTradingEngine):
         if now - self._last_offhour_heartbeat < 10800:  # 3h
             return
         self._last_offhour_heartbeat = now
-        hour = datetime.datetime.now().strftime("%H:%M")
-        self.telegram.send("💤 주식봇 대기 중 (%s)" % hour)
         logger.info("[대기 중] 장외 시간 — 봇 정상 작동")
 
     def _send_daily_report_if_needed(self):
