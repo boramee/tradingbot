@@ -58,7 +58,7 @@ OPEN_SETTLE = datetime.time(9, 5)
 GOLDEN_HOUR_END = datetime.time(10, 0)
 CLOSING_MODE = datetime.time(14, 30)
 
-STOCK_FEE = 0.00015  # 국내주식 수수료
+STOCK_FEE = 0.0010  # 국내주식 수수료+세금 (수수료0.015%×2 + 거래세0.05~0.15% ≒ 편도0.1%)
 
 
 @dataclass
