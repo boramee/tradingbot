@@ -56,7 +56,7 @@ MARKET_OPEN = datetime.time(9, 0)
 MARKET_CLOSE = datetime.time(15, 20)
 OPEN_SETTLE = datetime.time(9, 5)
 GOLDEN_HOUR_END = datetime.time(10, 0)
-CLOSING_MODE = datetime.time(14, 30)
+CLOSING_MODE = datetime.time(15, 10)
 
 STOCK_FEE = 0.0010  # 국내주식 수수료+세금 (수수료0.015%×2 + 거래세0.05~0.15% ≒ 편도0.1%)
 
@@ -1194,7 +1194,7 @@ class StockEngine(BaseTradingEngine):
                      self.take_profit_pct, self.trailing_pct)
         logger.info("  보호: 3연속손실→15분쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  필터: 코스피급락 + 수급 + 체결강도 + VI + 갭")
-        logger.info("  장: 09:05관망→10:00골든→14:30청산")
+        logger.info("  장: 09:05관망→10:00골든→15:10청산")
         logger.info("=" * 60)
 
         # 실전 모드: 사전점검 필수
