@@ -149,8 +149,8 @@ class StockScanner:
             logger.info("[스캐너 1단계] KIS 미인증 — 토큰 대기 중")
             return []
 
-        # J = 전체(코스피+코스닥), 50종목 조회
-        rankings = self.kis.get_volume_rank(market="J", limit=50)
+        # J = 전체시장(코스피+코스닥), API 최대 30건
+        rankings = self.kis.get_volume_rank(market="J", limit=30)
 
         if not rankings:
             logger.warning("[스캐너 1단계] get_volume_rank 응답 0건 — API 오류 또는 장 미개시")

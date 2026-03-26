@@ -56,7 +56,7 @@ MARKET_OPEN = datetime.time(9, 0)
 MARKET_CLOSE = datetime.time(15, 20)
 OPEN_SETTLE = datetime.time(9, 5)
 GOLDEN_HOUR_END = datetime.time(10, 0)
-CLOSING_MODE = datetime.time(14, 30)
+CLOSING_MODE = datetime.time(15, 10)
 
 STOCK_FEE = 0.0010  # 국내주식 수수료+세금 (수수료0.015%×2 + 거래세0.05~0.15% ≒ 편도0.1%)
 
@@ -839,6 +839,11 @@ class StockEngine(BaseTradingEngine):
             # 분봉 기반 매도 판단 (기존 손절/익절에 안 걸린 경우)
             if not sold and mode not in ("opening_wait", "closing"):
                 now_ts = time.time()
+                # 매수 후 최소 5분은 보유 (분봉 데이터 축적 필요)
+                hold_secs = now_ts - pos.entry_time
+                if hold_secs < 300:
+                    logger.debug("[분봉매도] %s 보유 %.0f초 < 5분 → 스킵", label, hold_secs)
+                    continue
                 last_check = getattr(pos, '_last_sell_check', 0)
                 if now_ts - last_check >= 30:  # 30초 쿨다운
                     pos._last_sell_check = now_ts
@@ -919,6 +924,7 @@ class StockEngine(BaseTradingEngine):
             logger.debug("[자동스캔] 스캐너 후보 없음")
             return
 
+        bought_count = 0
         for i, best in enumerate(candidates):
             logger.info("[자동스캔] 후보 %d/%d: %s %s (%.0f점, %+.1f%%)",
                         i + 1, len(candidates), best.code, best.name, best.score, best.change_pct)
@@ -1003,6 +1009,7 @@ class StockEngine(BaseTradingEngine):
                            best.sector or "개별", ", ".join(best.reasons)))
                 except Exception as e:
                     logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
+                bought_count += 1
                 # 슬롯 다 찼으면 종료, 아니면 계속 스캔
                 holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
                 logger.info("[자동스캔] %s 매수 완료, 보유 %d/%d — %s",
@@ -1026,7 +1033,10 @@ class StockEngine(BaseTradingEngine):
                     logger.warning("[자동스캔] 텔레그램 전송 실패: %s", e)
                 self.stock_code = old_code
 
-        logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))
+        if bought_count == 0:
+            logger.info("[자동스캔] %d개 후보 모두 매수 불가", len(candidates))
+        else:
+            logger.info("[자동스캔] %d개 후보 중 %d종목 매수 완료", len(candidates), bought_count)
 
     # ── 시작 ──
 
@@ -1194,7 +1204,7 @@ class StockEngine(BaseTradingEngine):
                      self.take_profit_pct, self.trailing_pct)
         logger.info("  보호: 3연속손실→15분쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  필터: 코스피급락 + 수급 + 체결강도 + VI + 갭")
-        logger.info("  장: 09:05관망→10:00골든→14:30청산")
+        logger.info("  장: 09:05관망→10:00골든→15:10청산")
         logger.info("=" * 60)
 
         # 실전 모드: 사전점검 필수

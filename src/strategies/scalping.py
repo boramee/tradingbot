@@ -252,7 +252,7 @@ class ScalpingStrategy(BaseStrategy):
         tag = " | ".join(reasons)
         conf = max(0, min(1.0, score))
 
-        if conf >= 0.5:
+        if conf >= 0.65:
             return TradeSignal(Signal.SELL, conf, "분봉매도: %s" % tag, price)
 
         return TradeSignal(Signal.HOLD, conf, "분봉홀딩: %s" % tag, price)
