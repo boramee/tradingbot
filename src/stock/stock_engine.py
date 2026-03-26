@@ -41,6 +41,7 @@ from src.trader.base_engine import BaseTradingEngine
 from .kis_client import KISClient
 from .scanner import StockScanner
 from .watchlist import Watchlist, WatchItem
+from .investor_flow import InvestorFlow
 from src.intelligence.market_sentiment import MarketSentiment
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,7 @@ class StockEngine(BaseTradingEngine):
         self._scalping = ScalpingStrategy()
         self.sentiment = MarketSentiment(self.kis)
         self.watchlist = Watchlist()
+        self.investor_flow = InvestorFlow()
         self.position = StockPosition(code=stock_code)  # 호환용 (고정종목 모드)
         self.positions: Dict[str, StockPosition] = {}  # 멀티 종목 포지션
         self.max_positions = 3  # 최대 동시 보유 종목 수
@@ -958,6 +960,20 @@ class StockEngine(BaseTradingEngine):
             # 눌림목 목표가: 전일 종가 -3% 또는 5일선 중 높은 가격
             pullback = max(int(best.price * 0.97), int(ma5)) if ma5 > 0 else int(best.price * 0.97)
 
+            # 외국인/기관 수급 체크 (pykrx)
+            foreign_flow, inst_flow = 0, 0
+            flow = self.investor_flow.get_flow(best.code, days=5)
+            if flow:
+                foreign_flow = flow["foreign_consecutive_buy"]
+                if flow["foreign_consecutive_sell"] > 0:
+                    foreign_flow = -flow["foreign_consecutive_sell"]
+                inst_flow = flow["inst_consecutive_buy"]
+                # 외국인 3일 연속 순매도 → 제외
+                if flow["foreign_consecutive_sell"] >= 3:
+                    logger.info("[스윙] %s 외국인 %d일 연속 순매도 → 제외",
+                                best.name, flow["foreign_consecutive_sell"])
+                    continue
+
             item = WatchItem(
                 code=best.code,
                 name=best.name,
@@ -969,21 +985,31 @@ class StockEngine(BaseTradingEngine):
                 ma5=ma5,
                 ma20=ma20,
                 pullback_target=pullback,
+                foreign_flow=foreign_flow,
+                inst_flow=inst_flow,
             )
             watch_items.append(item)
-            logger.info("[스윙] 관심종목: %s %s | 종가:%s원 | 5MA:%s원 | 목표매수:%s원 | 점수:%.0f",
+            flow_str = " | 외인:%+d일 기관:%+d일" % (foreign_flow, inst_flow) if flow else ""
+            logger.info("[스윙] 관심종목: %s %s | 종가:%s원 | 5MA:%s원 | 목표매수:%s원 | 점수:%.0f%s",
                         best.code, best.name,
                         "{:,}".format(best.price),
                         "{:,}".format(int(ma5)),
                         "{:,}".format(pullback),
-                        best.score)
+                        best.score, flow_str)
 
         if watch_items:
             self.watchlist.update_candidates(watch_items, today)
             try:
+                def _flow_tag(w):
+                    if w.foreign_flow > 0:
+                        return " 외인%+d일" % w.foreign_flow
+                    elif w.foreign_flow < 0:
+                        return " 외인%+d일" % w.foreign_flow
+                    return ""
                 summary = "\n".join(
-                    "• %s %s (%.0f점) 목표:%s원" % (
-                        w.code, w.name, w.score, "{:,}".format(int(w.pullback_target)))
+                    "• %s %s (%.0f점) 목표:%s원%s" % (
+                        w.code, w.name, w.score,
+                        "{:,}".format(int(w.pullback_target)), _flow_tag(w))
                     for w in watch_items[:5])
                 self.telegram.send(
                     "<b>📋 내일 관심종목</b>\n%s\n\n총 %d종목 저장"
@@ -1314,6 +1340,7 @@ class StockEngine(BaseTradingEngine):
         logger.info("  보유: 최대 5거래일 | 보호: 3연속손실→쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  진입: 전일 관심종목 눌림목 매수 (종가-3%% 또는 5MA지지)")
         logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 하회 차단")
+        logger.info("  수급필터: 외국인 3일연속 순매도 종목 제외 (pykrx)")
         logger.info("  장: 09:05관망→10:00골든→15:10관심종목스캔")
         logger.info("=" * 60)
 
