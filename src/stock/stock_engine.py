@@ -933,6 +933,11 @@ class StockEngine(BaseTradingEngine):
                 logger.info("[자동스캔] %s 상한가/VI 근처 (%+.1f%%) → 스킵", best.name, best.change_pct)
                 continue
 
+            # 이미 급등한 종목 제외 (꼭대기 매수 방지)
+            if best.change_pct >= 10:
+                logger.info("[자동스캔] %s 이미 급등 (%+.1f%%) → 스킵", best.name, best.change_pct)
+                continue
+
             # 실시간 가격 확인
             scan_info = self.kis.get_current_price(best.code)
             if not scan_info:
