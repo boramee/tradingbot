@@ -1038,12 +1038,15 @@ class StockEngine(BaseTradingEngine):
                              ma5_support)
                 continue
 
-            # ── 거래량 체크: 조정 시 거래량 적어야 건강한 눌림 ──
+            # ── 거래량 체크: 음봉+거래량 급증=투매, 양봉+거래량 급증=매수세 ──
             if scan_df is not None and len(scan_df) >= 3:
                 today_vol = float(scan_df["volume"].iloc[-1]) if "volume" in scan_df.columns else 0
                 prev_vol = float(scan_df["volume"].iloc[-2]) if "volume" in scan_df.columns else 1
-                if prev_vol > 0 and today_vol > prev_vol * 1.5:
-                    logger.info("[스윙매수] %s 거래량 급증 중 (%.0fx) → 투매 가능 → 스킵",
+                today_close = float(scan_df["close"].iloc[-1])
+                today_open = float(scan_df["open"].iloc[-1])
+                is_bearish = today_close < today_open
+                if prev_vol > 0 and today_vol > prev_vol * 1.5 and is_bearish:
+                    logger.info("[스윙매수] %s 음봉+거래량 급증 (%.0fx) → 투매 가능 → 스킵",
                                 item.name, today_vol / prev_vol)
                     continue
 
