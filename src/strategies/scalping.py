@@ -121,19 +121,21 @@ class ScalpingStrategy(BaseStrategy):
             score += 0.1
             reasons.append("호가건전(%.1f)" % ob)
         elif ob > self.MAX_ORDERBOOK_RATIO:
-            score -= 0.1
-            reasons.append("호가위험(매수과다%.1f)" % ob)
+            return TradeSignal(Signal.HOLD, 0,
+                               "호가위험(매수과다%.1f)" % ob, price)
         else:
-            score -= 0.1
-            reasons.append("호가위험(매도압도%.1f)" % ob)
+            return TradeSignal(Signal.HOLD, 0,
+                               "호가위험(매도압도%.1f)" % ob, price)
 
         # ── 5. 고점 대비 위치 (꼭대기 매수 방지) ──
         position = self._get_high_position(mdf)
         if position is not None:
-            if position > self.MAX_HIGH_POSITION:
-                # 꼭대기 근처 — 강한 감점
-                score -= 0.2
-                reasons.append("꼭대기(%.0f%%위치)" % (position * 100))
+            if position > 0.90:
+                return TradeSignal(Signal.HOLD, 0,
+                                   "꼭대기(%.0f%%위치→조정대기)" % (position * 100), price)
+            elif position > self.MAX_HIGH_POSITION:
+                score -= 0.1
+                reasons.append("고점근처(%.0f%%)" % (position * 100))
             elif position < 0.5:
                 # 중간 이하 — 눌림목 구간
                 score += 0.1
