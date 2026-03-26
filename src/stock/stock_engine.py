@@ -768,8 +768,9 @@ class StockEngine(BaseTradingEngine):
 
             # ── 분봉 데이터 조회 ──
             mdf = self.kis.get_minute_ohlcv(best.code)
-            if mdf is None or len(mdf) < 10:
-                logger.info("[자동스캔] %s 분봉 데이터 부족 → 스킵", best.name)
+            if mdf is None or len(mdf) < 5:
+                logger.info("[자동스캔] %s 분봉 데이터 부족 (%d건) → 스킵",
+                            best.name, len(mdf) if mdf is not None else 0)
                 continue
 
             # ── 체결강도 + 호가창 조회 ──

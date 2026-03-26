@@ -190,7 +190,7 @@ class KISClient:
             return None
 
     def get_minute_ohlcv(self, stock_code: str, minute: int = 1) -> Optional[pd.DataFrame]:
-        """분봉 OHLCV 조회"""
+        """분봉 OHLCV 조회. minute: 1, 3, 5, 10, 15, 30, 60"""
         try:
             import datetime
             now = datetime.datetime.now().strftime("%H%M%S")
@@ -203,12 +203,21 @@ class KISClient:
                     "FID_INPUT_ISCD": stock_code,
                     "FID_INPUT_HOUR_1": now,
                     "FID_PW_DATA_INCU_YN": "Y",
+                    "FID_ETC_CLS_CODE": "",
                 },
                 timeout=10,
             )
             data = resp.json()
+
+            rt_cd = data.get("rt_cd", "")
+            if rt_cd != "0":
+                logger.debug("[KIS] 분봉 조회 실패 [%s]: rt_cd=%s, msg=%s",
+                             stock_code, rt_cd, data.get("msg1", ""))
+                return None
+
             items = data.get("output2", [])
             if not items:
+                logger.debug("[KIS] 분봉 조회 [%s]: output2 비어있음", stock_code)
                 return None
 
             rows = []
@@ -226,11 +235,13 @@ class KISClient:
                 })
 
             if not rows:
+                logger.debug("[KIS] 분봉 조회 [%s]: 파싱 결과 0건 (raw %d건)", stock_code, len(items))
                 return None
 
             df = pd.DataFrame(rows)
             df["datetime"] = pd.to_datetime(df["datetime"], format="%Y%m%d%H%M%S")
             df = df.set_index("datetime").sort_index()
+            logger.debug("[KIS] 분봉 조회 [%s]: %d건", stock_code, len(df))
             return df
         except Exception as e:
             logger.error("[KIS] 분봉 조회 실패 [%s]: %s", stock_code, e)
