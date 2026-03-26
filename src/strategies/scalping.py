@@ -87,6 +87,9 @@ class ScalpingStrategy(BaseStrategy):
 
         # ── 2. 분봉 양봉 연속 체크 (추세 확인) ──
         bullish_count = self._count_bullish_candles(mdf)
+        if bullish_count == 0:
+            return TradeSignal(Signal.HOLD, 0,
+                               "양봉없음(하락중)", price)
         if bullish_count >= 3:
             score += 0.25
             reasons.append("양봉%d연속" % bullish_count)
@@ -94,12 +97,8 @@ class ScalpingStrategy(BaseStrategy):
             score += 0.15
             reasons.append("양봉%d연속" % bullish_count)
         else:
-            # 양봉이 아니어도, 직전봉 대비 상승 중이면 약간 가산
-            if len(mdf) >= 2 and float(mdf["close"].iloc[-1]) > float(mdf["close"].iloc[-2]):
-                score += 0.05
-                reasons.append("직전봉대비상승")
-            else:
-                reasons.append("양봉부족(%d)" % bullish_count)
+            score += 0.05
+            reasons.append("양봉%d개" % bullish_count)
 
         # ── 3. 체결강도 ──
         vp = ctx.volume_power
