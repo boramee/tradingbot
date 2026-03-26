@@ -425,13 +425,13 @@ class StockEngine(BaseTradingEngine):
                 "📊 <b>매도 근거</b>\n%s\n\n"
                 "💵 <b>손익</b>\n"
                 "매입가: %s원 → 매도가: %s원\n"
-                "수익: %+,.0f원 (%+.2f%%)\n"
+                "수익: %s원 (%+.2f%%)\n"
                 "보유: %s\n"
             ) % (
                 self.telegram.escape(reason),
                 "{:,}".format(self.position.avg_price),
                 "{:,}".format(price),
-                pnl_amount, pnl_pct,
+                "{:+,.0f}".format(pnl_amount), pnl_pct,
                 hold_str,
             )
 
@@ -680,8 +680,7 @@ class StockEngine(BaseTradingEngine):
         """
         mdf = self.kis.get_minute_ohlcv(code)
         if mdf is None or len(mdf) < 5:
-            # 분봉 데이터 없으면 통과 (API 실패 시 기존 로직 유지)
-            return True, "분봉없음(패스)"
+            return False, "분봉데이터부족(매수불가)"
 
         now_t = datetime.datetime.now().time()
         highs = mdf["high"].values
