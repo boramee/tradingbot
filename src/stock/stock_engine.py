@@ -137,7 +137,9 @@ class StockEngine(BaseTradingEngine):
         self.scanner = StockScanner(self.kis)
         self._scalping = ScalpingStrategy()
         self.sentiment = MarketSentiment(self.kis)
-        self.position = StockPosition(code=stock_code)
+        self.position = StockPosition(code=stock_code)  # 호환용 (고정종목 모드)
+        self.positions: Dict[str, StockPosition] = {}  # 멀티 종목 포지션
+        self.max_positions = 3  # 최대 동시 보유 종목 수
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
         self.kill_switch = KillSwitch(max_daily_loss_pct=3.0)
         self.trade_logger = TradeLogger()
@@ -321,11 +323,13 @@ class StockEngine(BaseTradingEngine):
 
         result = self.kis.buy(self.stock_code, qty)
         if result and result.get("success"):
-            self.position = StockPosition(
+            new_pos = StockPosition(
                 code=self.stock_code, name=self._stock_name,
                 avg_price=price, quantity=qty, highest_price=price,
                 entry_atr=current_atr, entry_time=time.time(),
             )
+            self.position = new_pos
+            self.positions[self.stock_code] = new_pos
             self._daily_trades += 1
             self._last_buy_time = time.time()
 
@@ -551,6 +555,12 @@ class StockEngine(BaseTradingEngine):
             self.telegram.send("🔔 <b>장 시작</b>\n종목: %s\n모드: %s" % (target, mode))
             logger.info("[장 시작] %s | %s", target, mode)
 
+        # ── 자동 스캔: 멀티 종목 관리 ──
+        if self.auto_scan:
+            self._run_multi_positions(mode)
+            return
+
+        # ── 고정 종목 모드 (기존 단일 종목 로직) ──
         df = self._fetch_data()
         if df is None or len(df) < 20:
             return
@@ -574,68 +584,18 @@ class StockEngine(BaseTradingEngine):
 
         # ── 보유 중: 손절/익절 (시간대 무관) ──
         if is_holding:
-            self.position.update_highest(price)
-            self._last_df = df  # v4: ADX 적응형 트레일링용
-            pnl_pct = self._calc_pnl(price)
-            label = "%s %s" % (self.stock_code, self._stock_name)
-
-            # 손절 (v4: 보호적 스톱 포함)
-            if self._check_stop_loss(price):
-                detail = self.get_stop_loss_detail(
-                    self.position.avg_price, price,
-                    self.position.entry_atr, self.position.partial_stage)
-                self.telegram.notify_stop_loss(label, price, abs(pnl_pct))
-                self._sell(detail)
-                self._last_stop_loss_time = time.time()
-                self._last_sell_time = time.time()
-                return
-
-            # v4: 3단계 분할익절 (ATR 동적)
-            stage = self.position.partial_stage
-            tp1, tp2 = self.get_partial_triggers(self.position.avg_price, self.position.entry_atr)
-
-            if stage == 0 and pnl_pct >= tp1:
-                self._sell("1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp1), partial=True)
-                self.position.partial_stage = 1
-                return
-
-            if stage == 1 and pnl_pct >= tp2:
-                self._sell("2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp2), partial=True)
-                self.position.partial_stage = 2
-                return
-
-            # v4: ADX 적응형 트레일링
-            if self._check_trailing(price):
-                detail = self.get_trailing_detail(
-                    self.position.avg_price, price,
-                    self.position.highest_price, self.position.entry_atr)
-                self.telegram.notify_take_profit(label, price, pnl_pct)
-                self._sell(detail)
-                self._last_sell_time = time.time()
-                return
-
-            # 14:30: 수익이면 청산, 손실이면 손절폭 내 유지
-            if mode == "closing":
-                if pnl_pct > 0:
-                    self._sell("장마감 전 익절 (%+.1f%%)" % pnl_pct)
-                elif pnl_pct < -1.0:
-                    self._sell("장마감 전 손절 (%+.1f%%)" % pnl_pct)
-                return
+            self._manage_single_position(mode, df, price)
+            return
 
         # ── 시간대별 매수 필터 ──
         if mode == "opening_wait":
             return
-        if mode == "closing" and not self.auto_scan:
+        if mode == "closing":
             return
 
         # ── 쿨다운 (v4: 공통 로직) ──
         now = time.time()
         if self.is_in_cooldown():
-            return
-
-        # ── 자동 스캔 모드 (전략 분석 전에 실행) ──
-        if self.auto_scan and not is_holding:
-            self._run_auto_scan(now, df, price)
             return
 
         # ── 고정 종목 모드 ──
@@ -736,6 +696,163 @@ class StockEngine(BaseTradingEngine):
             drop_info = "고점대비%.1f%%위치" % (100 - pos_pct) if pos_pct < 100 else "고점"
         return False, "꼭대기매수방지(%s)" % (drop_info or "분석불가")
 
+    def _manage_single_position(self, mode: str, df, price: int):
+        """단일 포지션 손절/익절 관리 (고정 종목 모드용)"""
+        self.position.update_highest(price)
+        self._last_df = df
+        pnl_pct = self._calc_pnl(price)
+        label = "%s %s" % (self.stock_code, self._stock_name)
+
+        if self._check_stop_loss(price):
+            detail = self.get_stop_loss_detail(
+                self.position.avg_price, price,
+                self.position.entry_atr, self.position.partial_stage)
+            self.telegram.notify_stop_loss(label, price, abs(pnl_pct))
+            self._sell(detail)
+            self._last_stop_loss_time = time.time()
+            self._last_sell_time = time.time()
+            return
+
+        stage = self.position.partial_stage
+        tp1, tp2 = self.get_partial_triggers(self.position.avg_price, self.position.entry_atr)
+
+        if stage == 0 and pnl_pct >= tp1:
+            self._sell("1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp1), partial=True)
+            self.position.partial_stage = 1
+            return
+
+        if stage == 1 and pnl_pct >= tp2:
+            self._sell("2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp2), partial=True)
+            self.position.partial_stage = 2
+            return
+
+        if self._check_trailing(price):
+            detail = self.get_trailing_detail(
+                self.position.avg_price, price,
+                self.position.highest_price, self.position.entry_atr)
+            self.telegram.notify_take_profit(label, price, pnl_pct)
+            self._sell(detail)
+            self._last_sell_time = time.time()
+            return
+
+        if mode == "closing":
+            if pnl_pct > 0:
+                self._sell("장마감 전 익절 (%+.1f%%)" % pnl_pct)
+            elif pnl_pct < -1.0:
+                self._sell("장마감 전 손절 (%+.1f%%)" % pnl_pct)
+
+    def _run_multi_positions(self, mode: str):
+        """멀티 종목 관리: 보유 종목 손절/익절 + 빈 슬롯이면 스캔"""
+        # ── 1. 잔고 동기화 ──
+        balance = self.kis.get_balance() if self.kis.is_authenticated else None
+        if balance:
+            live_codes = set()
+            for h in balance["holdings"]:
+                code = h["code"]
+                live_codes.add(code)
+                if code in self.positions:
+                    self.positions[code].quantity = h["quantity"]
+                    self.positions[code].avg_price = h["avg_price"]
+                elif h["quantity"] > 0:
+                    # 봇 외부에서 매수한 종목이면 추적 시작
+                    self.positions[code] = StockPosition(
+                        code=code, name=h.get("name", ""),
+                        avg_price=h["avg_price"], quantity=h["quantity"],
+                        highest_price=h["avg_price"], entry_time=time.time(),
+                    )
+            # 잔고에 없는 포지션 제거 (이미 매도 완료)
+            for code in list(self.positions):
+                if code not in live_codes:
+                    del self.positions[code]
+
+        # ── 2. 보유 종목 손절/익절 관리 ──
+        for code, pos in list(self.positions.items()):
+            if pos.quantity <= 0:
+                continue
+
+            info = self.kis.get_current_price(code)
+            if not info:
+                continue
+            cur_price = info["price"]
+            pos.update_highest(cur_price)
+
+            pnl_pct = self.calc_pnl(pos.avg_price, cur_price)
+            label = "%s %s" % (code, pos.name)
+
+            # 임시로 self.stock_code/position 설정 (_sell이 사용)
+            saved_code = self.stock_code
+            saved_name = self._stock_name
+            saved_pos = self.position
+            self.stock_code = code
+            self._stock_name = pos.name
+            self.position = pos
+
+            sold = False
+
+            # 손절
+            if self.check_stop_loss(pos.avg_price, cur_price, pos.entry_atr, pos.partial_stage):
+                detail = self.get_stop_loss_detail(pos.avg_price, cur_price, pos.entry_atr, pos.partial_stage)
+                self.telegram.notify_stop_loss(label, cur_price, abs(pnl_pct))
+                self._sell(detail)
+                sold = True
+
+            # 분할익절
+            elif pos.partial_stage == 0:
+                tp1, _ = self.get_partial_triggers(pos.avg_price, pos.entry_atr)
+                if pnl_pct >= tp1:
+                    self._sell("1차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp1), partial=True)
+                    pos.partial_stage = 1
+
+            elif pos.partial_stage == 1:
+                _, tp2 = self.get_partial_triggers(pos.avg_price, pos.entry_atr)
+                if pnl_pct >= tp2:
+                    self._sell("2차 분할익절 (+%.1f%%, 기준:%.1f%%)" % (pnl_pct, tp2), partial=True)
+                    pos.partial_stage = 2
+
+            # 트레일링
+            elif self.check_trailing_stop(pos.avg_price, cur_price, pos.highest_price, pos.entry_atr, pos.partial_stage):
+                detail = self.get_trailing_detail(pos.avg_price, cur_price, pos.highest_price, pos.entry_atr)
+                self.telegram.notify_take_profit(label, cur_price, pnl_pct)
+                self._sell(detail)
+                sold = True
+
+            # 장마감 청산
+            if not sold and mode == "closing":
+                if pnl_pct > 0:
+                    self._sell("장마감 전 익절 (%+.1f%%)" % pnl_pct)
+                elif pnl_pct < -1.0:
+                    self._sell("장마감 전 손절 (%+.1f%%)" % pnl_pct)
+
+            # 복원
+            self.stock_code = saved_code
+            self._stock_name = saved_name
+            self.position = saved_pos
+
+        # ── 3. 빈 슬롯 있으면 스캔 ──
+        holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
+        if holding_count >= self.max_positions:
+            return
+
+        if mode == "opening_wait":
+            return
+        if mode == "closing" and not self.auto_scan:
+            return
+
+        now = time.time()
+        if self.is_in_cooldown():
+            return
+
+        # 기본 df/price (스캔용)
+        df = self._fetch_data()
+        if df is None or len(df) < 20:
+            return
+        df = self.indicators.add_all(df)
+        price = self._get_price()
+        if price <= 0:
+            return
+
+        self._run_auto_scan(now, df, price)
+
     def _run_auto_scan(self, now: float, df, price: int):
         """자동 스캔: 스캐너 → 분봉 단타 전략 → 매수"""
         ok, reason = self._pre_buy_checks(now, df, price)
@@ -751,6 +868,11 @@ class StockEngine(BaseTradingEngine):
         for i, best in enumerate(candidates):
             logger.info("[자동스캔] 후보 %d/%d: %s %s (%.0f점, %+.1f%%)",
                         i + 1, len(candidates), best.code, best.name, best.score, best.change_pct)
+
+            # 이미 보유 중인 종목 스킵
+            if best.code in self.positions and self.positions[best.code].quantity > 0:
+                logger.debug("[자동스캔] %s 이미 보유 중 → 스킵", best.name)
+                continue
 
             # VI/상한가 조기 체크
             if best.change_pct >= 25:
@@ -995,7 +1117,15 @@ class StockEngine(BaseTradingEngine):
 
         mode = self.get_trading_mode()
         hold_str = ""
-        if self.position.is_holding:
+        active_positions = {c: p for c, p in self.positions.items() if p.quantity > 0}
+        if active_positions:
+            parts = []
+            for code, pos in active_positions.items():
+                info = self.kis.get_current_price(code)
+                pnl = self.calc_pnl(pos.avg_price, info["price"]) if info else 0
+                parts.append("%s(%+.1f%%)" % (pos.name or code, pnl))
+            hold_str = "보유%d/%d: %s" % (len(active_positions), self.max_positions, " / ".join(parts))
+        elif self.position.is_holding:
             price = self._get_price()
             pnl = self._calc_pnl(price) if price > 0 else 0
             hold_str = "보유: %s %s (%+.1f%%)" % (self.stock_code, self._stock_name, pnl)
