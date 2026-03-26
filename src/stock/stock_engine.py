@@ -34,6 +34,7 @@ from src.strategies.bollinger import BollingerStrategy
 from src.strategies.combined import CombinedStrategy
 from src.strategies.adaptive import AdaptiveStrategy
 from src.strategies.fear_greed import FearGreedStrategy
+from src.strategies.scalping import ScalpingStrategy
 from src.utils.telegram_bot import TelegramNotifier
 from src.utils.safety import KillSwitch, TradeLogger
 from src.utils.daily_report import DailyReport
@@ -134,6 +135,7 @@ class StockEngine(BaseTradingEngine):
         self.adv = AdvancedIndicators()
         self.strategy = STRATEGY_MAP.get(strategy_name.lower(), MACDStrategy)()
         self.scanner = StockScanner(self.kis)
+        self._scalping = ScalpingStrategy()
         self.sentiment = MarketSentiment(self.kis)
         self.position = StockPosition(code=stock_code)
         self.telegram = TelegramNotifier(telegram_token, telegram_chat_id)
@@ -733,7 +735,7 @@ class StockEngine(BaseTradingEngine):
         return False, "꼭대기매수방지(%s)" % (drop_info or "분석불가")
 
     def _run_auto_scan(self, now: float, df, price: int):
-        """자동 스캔: 스캐너 → 필터 → 전략 → 매수 (상위 10개 순회)"""
+        """자동 스캔: 스캐너 → 분봉 단타 전략 → 매수"""
         ok, reason = self._pre_buy_checks(now, df, price)
         if not ok:
             logger.debug("[자동스캔] 매수 필터 차단: %s", reason)
@@ -748,45 +750,55 @@ class StockEngine(BaseTradingEngine):
             logger.info("[자동스캔] 후보 %d/%d: %s %s (%.0f점, %+.1f%%)",
                         i + 1, len(candidates), best.code, best.name, best.score, best.change_pct)
 
-            # VI/상한가 조기 체크 (OHLCV 조회 전 — 스캐너 등락률 기반)
+            # VI/상한가 조기 체크
             if best.change_pct >= 25:
                 logger.info("[자동스캔] %s 상한가/VI 근처 (%+.1f%%) → 스킵", best.name, best.change_pct)
                 continue
 
-            # 스캔 종목의 차트 분석
-            scan_df = self.kis.get_ohlcv(best.code, period="D", count=60)
-            if scan_df is None or len(scan_df) < 20:
-                logger.info("[자동스캔] %s OHLCV 데이터 부족 → 스킵", best.name)
-                continue
-
-            scan_df = self.indicators.add_all(scan_df)
-            try:
-                sig = self.strategy.analyze(scan_df, scanner_score=best.score)
-            except TypeError:
-                sig = self.strategy.analyze(scan_df)
-
-            if sig.signal != Signal.BUY or not sig.is_actionable:
-                logger.info("[자동스캔] %s 전략 시그널 미발생 (%s) → 다음 후보", best.name, sig.reason)
-                continue
-
-            # VI 체크
+            # 실시간 가격 확인
             scan_info = self.kis.get_current_price(best.code)
-            if scan_info and scan_info.get("change_pct", 0) >= 25:
+            if not scan_info:
+                logger.info("[자동스캔] %s 현재가 조회 실패 → 스킵", best.name)
+                continue
+            if scan_info.get("change_pct", 0) >= 25:
                 logger.info("[자동스캔] %s VI 근처 → 스킵", best.name)
                 continue
 
-            # 갭 체크
-            scan_price = scan_info["price"] if scan_info else 0
-            gap = self._check_gap(scan_df, scan_price)
-            if gap:
-                logger.info("[자동스캔] %s %s → 스킵", best.name, gap)
+            scan_price = scan_info["price"]
+
+            # ── 분봉 데이터 조회 ──
+            mdf = self.kis.get_minute_ohlcv(best.code)
+            if mdf is None or len(mdf) < 10:
+                logger.info("[자동스캔] %s 분봉 데이터 부족 → 스킵", best.name)
                 continue
 
-            # ── 분봉 기반 진입 타이밍 검증 ──
-            entry_ok, entry_reason = self._check_entry_timing(best.code, best.name, scan_price)
-            if not entry_ok:
-                logger.info("[자동스캔] %s 진입타이밍 부적합 (%s) → 다음 후보", best.name, entry_reason)
+            # ── 체결강도 + 호가창 조회 ──
+            vp = self.kis.get_volume_power(best.code)
+            ob = self.kis.get_orderbook_ratio(best.code)
+            ob_ratio = ob["bid_ask_ratio"] if ob else 1.0
+
+            # ── 분봉 단타 전략 분석 ──
+            from src.strategies.scalping import ScalpingContext
+            ctx = ScalpingContext(
+                minute_df=mdf,
+                volume_power=vp,
+                orderbook_ratio=ob_ratio,
+                scanner_score=best.score,
+            )
+            sig = self._scalping.analyze_scalping(ctx)
+
+            if sig.signal != Signal.BUY:
+                logger.info("[자동스캔] %s %s → 다음 후보", best.name, sig.reason)
                 continue
+
+            # ── 일봉 ATR (손절용) ──
+            scan_df = self.kis.get_ohlcv(best.code, period="D", count=30)
+            atr = 0.0
+            if scan_df is not None and len(scan_df) >= 14:
+                scan_df = self.indicators.add_all(scan_df)
+                atr_val = scan_df["atr"].iloc[-1]
+                if pd.notna(atr_val):
+                    atr = float(atr_val)
 
             # 종목 전환
             old_code = self.stock_code
@@ -795,12 +807,11 @@ class StockEngine(BaseTradingEngine):
             self._supply_cache = None
             self._supply_cache_time = 0
 
-            atr = float(scan_df["atr"].iloc[-1]) if "atr" in scan_df.columns and pd.notna(scan_df["atr"].iloc[-1]) else 0
-            scan_reason = "스캐너(%.0f점: %s) + %s | 진입:%s" % (
-                best.score, ", ".join(best.reasons[:3]), sig.reason, entry_reason)
+            scan_reason = "스캐너(%.0f점: %s) + %s" % (
+                best.score, ", ".join(best.reasons[:3]), sig.reason)
 
             logger.info("[자동스캔] %s %s 매수 시도 (사유: %s)", best.code, best.name, scan_reason)
-            if self._buy(scan_reason, current_atr=atr):
+            if self._buy(scan_reason, current_atr=atr, confidence=sig.confidence):
                 self.scanner.exclude(best.code)
                 self.telegram.send(
                     "<b>📡 스캐너 종목 선정</b>\n종목: %s %s\n점수: %.0f\n섹터: %s\n사유: %s"
@@ -917,8 +928,9 @@ class StockEngine(BaseTradingEngine):
         scan_str = "자동 스캔" if self.auto_scan else "고정: %s" % self.stock_code
 
         logger.info("=" * 60)
-        logger.info("  주식 자동매매 봇 v3 시작")
-        logger.info("  종목: %s | 전략: %s | 모드: %s", scan_str, self.strategy.name, mode_str)
+        strat_name = "Scalping(분봉단타)" if self.auto_scan else self.strategy.name
+        logger.info("  주식 자동매매 봇 v5 시작")
+        logger.info("  종목: %s | 전략: %s | 모드: %s", scan_str, strat_name, mode_str)
         logger.info("  투자: %.0f%% (최대 %s원) | 수수료: %.3f%%",
                      self.invest_ratio * 100, "{:,}".format(self.max_invest_krw), self.fee_rate * 100)
         logger.info("  손절: ATR×%.1f (폴백-%.1f%%) | 익절: +%.1f%%→분할→트레일링%.1f%%",
