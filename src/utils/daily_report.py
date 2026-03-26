@@ -14,8 +14,23 @@ logger = logging.getLogger(__name__)
 class DailyReport:
     """trades.csv에서 당일 거래를 집계하여 리포트 생성"""
 
+    LOCK_DIR = "logs"
+
     def __init__(self, csv_path: str = "logs/trades.csv"):
         self._path = csv_path
+
+    def already_sent(self, target_date: str) -> bool:
+        """다른 봇 프로세스가 이미 해당 날짜 리포트를 전송했는지 확인"""
+        lock = os.path.join(self.LOCK_DIR, ".report_sent_%s" % target_date)
+        if os.path.exists(lock):
+            return True
+        try:
+            os.makedirs(self.LOCK_DIR, exist_ok=True)
+            with open(lock, "w") as f:
+                f.write(str(os.getpid()))
+        except Exception:
+            pass
+        return False
 
     def generate(self, target_date: Optional[str] = None) -> str:
         """특정 날짜의 수익 리포트 생성. 기본=오늘."""

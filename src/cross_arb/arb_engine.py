@@ -628,6 +628,10 @@ class CrossArbEngine:
             self._last_report_date = today
             return
         yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        if self._daily_report.already_sent(yesterday):
+            logger.debug("[일일리포트] %s 이미 전송됨 (다른 봇)", yesterday)
+            self._last_report_date = today
+            return
         report = self._daily_report.generate(yesterday)
         self.telegram.send(report)
         logger.info("[일일리포트] %s 전송 완료", yesterday)
