@@ -962,6 +962,7 @@ class StockEngine(BaseTradingEngine):
 
             # 외국인/기관 수급 체크 (pykrx)
             foreign_flow, inst_flow = 0, 0
+            flow_bonus = 0
             flow = self.investor_flow.get_flow(best.code, days=5)
             if flow:
                 foreign_flow = flow["foreign_consecutive_buy"]
@@ -973,14 +974,21 @@ class StockEngine(BaseTradingEngine):
                     logger.info("[스윙] %s 외국인 %d일 연속 순매도 → 제외",
                                 best.name, flow["foreign_consecutive_sell"])
                     continue
+                # 수급 가산점
+                if flow["both_buying"]:
+                    flow_bonus += 20  # 외인+기관 동반 순매수
+                if flow["foreign_consecutive_buy"] >= 3:
+                    flow_bonus += 15  # 외인 3일 연속 순매수
+                if flow["inst_consecutive_buy"] >= 1:
+                    flow_bonus += 10  # 기관 순매수
 
             item = WatchItem(
                 code=best.code,
                 name=best.name,
                 close=best.price,
                 change_pct=best.change_pct,
-                score=best.score,
-                reasons=best.reasons[:5],
+                score=best.score + flow_bonus,
+                reasons=best.reasons[:5] + (["수급+%d" % flow_bonus] if flow_bonus > 0 else []),
                 trade_value=best.trade_value,
                 ma5=ma5,
                 ma20=ma20,
