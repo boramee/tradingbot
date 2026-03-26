@@ -947,7 +947,11 @@ class StockEngine(BaseTradingEngine):
                     "<b>📡 스캐너 종목 선정</b>\n종목: %s %s\n점수: %.0f\n섹터: %s\n사유: %s"
                     % (best.code, best.name, best.score,
                        best.sector or "개별", ", ".join(best.reasons)))
-                return
+                # 슬롯 다 찼으면 종료, 아니면 계속 스캔
+                holding_count = sum(1 for p in self.positions.values() if p.quantity > 0)
+                if holding_count >= self.max_positions:
+                    return
+                continue
             else:
                 logger.info("[자동스캔] %s 매수 실패 (잔고 부족 가능)", best.name)
                 self.telegram.send(
@@ -1043,8 +1047,34 @@ class StockEngine(BaseTradingEngine):
 
         return critical_ok
 
+    def _restore_today_exclusions(self):
+        """재시작 시 당일 매매한 종목을 스캐너 제외 목록에 복원"""
+        import csv
+        import os
+        csv_path = "logs/trades.csv"
+        if not os.path.exists(csv_path):
+            return
+        today = datetime.date.today().isoformat()
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    dt = row.get("datetime", "")
+                    if dt.startswith(today) and row.get("bot") == "stock_trader":
+                        code = row.get("symbol", "")
+                        if code and row.get("side") == "SELL":
+                            self.scanner.exclude(code)
+            excluded = self.scanner._excluded
+            if excluded:
+                logger.info("[복원] 당일 매도 종목 제외: %s", ", ".join(excluded))
+        except Exception as e:
+            logger.debug("[복원] 제외 목록 로드 실패: %s", e)
+
     def start(self, poll_sec: int = 10):
         self.running = True
+
+        # 재시작 시 당일 매매 종목 exclusion 복원
+        self._restore_today_exclusions()
 
         def _stop(signum, frame):
             self.running = False
