@@ -833,6 +833,35 @@ class StockEngine(BaseTradingEngine):
                 self._sell(detail)
                 sold = True
 
+            # 분봉 기반 매도 판단 (기존 손절/익절에 안 걸린 경우)
+            if not sold and mode not in ("opening_wait", "closing"):
+                now_ts = time.time()
+                last_check = getattr(pos, '_last_sell_check', 0)
+                if now_ts - last_check >= 30:  # 30초 쿨다운
+                    pos._last_sell_check = now_ts
+                    try:
+                        from src.strategies.scalping import ScalpingContext
+                        sell_mdf = self.kis.get_minute_ohlcv(code)
+                        if sell_mdf is not None and len(sell_mdf) >= 5:
+                            sell_vp = self.kis.get_volume_power(code)
+                            sell_ob = self.kis.get_orderbook_ratio(code)
+                            sell_ob_ratio = sell_ob["bid_ask_ratio"] if sell_ob else 1.0
+                            sell_ctx = ScalpingContext(
+                                minute_df=sell_mdf,
+                                volume_power=sell_vp,
+                                orderbook_ratio=sell_ob_ratio,
+                            )
+                            sell_sig = self._scalping.analyze_sell(sell_ctx, pnl_pct)
+                            if sell_sig.signal == Signal.SELL:
+                                logger.info("[분봉매도] %s %s (PnL:%+.1f%%, 신뢰도:%.0f%%)",
+                                            label, sell_sig.reason, pnl_pct, sell_sig.confidence * 100)
+                                self._sell(sell_sig.reason)
+                                sold = True
+                            else:
+                                logger.debug("[분봉매도] %s 홀딩 (%s)", label, sell_sig.reason)
+                    except Exception as e:
+                        logger.warning("[분봉매도] %s 분석 실패: %s", label, e)
+
             # 장마감 청산
             if not sold and mode == "closing":
                 if pnl_pct > 0:
