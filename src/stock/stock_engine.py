@@ -196,7 +196,7 @@ class StockEngine(BaseTradingEngine):
             self._index_cache_time = now
         if self._index_cache:
             idx_change = self._index_cache.get("change_pct", 0)
-            if idx_change <= -1.5:
+            if idx_change <= -2.5:
                 return False, "코스피 급락 (%.1f%%)" % idx_change
         return True, ""
 
