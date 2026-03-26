@@ -90,8 +90,12 @@ class ScalpingStrategy(BaseStrategy):
         if bullish_count == 0:
             return TradeSignal(Signal.HOLD, 0,
                                "양봉없음(하락중)", price)
+        if bullish_count >= 5:
+            # 5연속 이상 양봉 = 과열, 눌림목 대기
+            return TradeSignal(Signal.HOLD, 0,
+                               "양봉%d연속(과열→조정대기)" % bullish_count, price)
         if bullish_count >= 3:
-            score += 0.25
+            score += 0.2
             reasons.append("양봉%d연속" % bullish_count)
         elif bullish_count >= self.MIN_BULLISH_CANDLES:
             score += 0.15
