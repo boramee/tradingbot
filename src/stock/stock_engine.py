@@ -839,6 +839,11 @@ class StockEngine(BaseTradingEngine):
             # 분봉 기반 매도 판단 (기존 손절/익절에 안 걸린 경우)
             if not sold and mode not in ("opening_wait", "closing"):
                 now_ts = time.time()
+                # 매수 후 최소 5분은 보유 (분봉 데이터 축적 필요)
+                hold_secs = now_ts - pos.entry_time
+                if hold_secs < 300:
+                    logger.debug("[분봉매도] %s 보유 %.0f초 < 5분 → 스킵", label, hold_secs)
+                    continue
                 last_check = getattr(pos, '_last_sell_check', 0)
                 if now_ts - last_check >= 30:  # 30초 쿨다운
                     pos._last_sell_check = now_ts
