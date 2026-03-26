@@ -160,6 +160,8 @@ class StockEngine(BaseTradingEngine):
         self._last_offhour_heartbeat: float = 0
         self._market_open_notified: str = ""  # 장 시작 알림 날짜
         self._market_close_notified: bool = False
+        # 재진입 차단 복원 범위(분): 기본 0(복원 비활성, 스캔 우선)
+        self.sell_exclusion_minutes = 0
 
     # ── 시간대 ──
 
@@ -478,8 +480,9 @@ class StockEngine(BaseTradingEngine):
                     self.positions[self.stock_code].quantity = self.position.quantity
             else:
                 self.kill_switch.record_trade(pnl_amount)
-                # 매도 종목 재매수 방지
-                self.scanner.exclude(self.stock_code)
+                # 매도 종목 재매수 방지 (옵션): sell_exclusion_minutes>0일 때만 유지
+                if self.sell_exclusion_minutes > 0:
+                    self.scanner.exclude(self.stock_code)
                 # v4: 공통 승률 추적 + 쿨다운 로직
                 self.record_trade_result(pnl_pct)
                 if self._consecutive_losses >= self._max_consecutive_losses:
@@ -879,6 +882,11 @@ class StockEngine(BaseTradingEngine):
         if holding_count >= self.max_positions:
             return
 
+        # 제외 복원이 비활성일 때는 스캔 후보를 막지 않도록 제외 목록 정리
+        if self.auto_scan and self.sell_exclusion_minutes == 0 and self.scanner._excluded:
+            logger.info("[자동스캔] 제외 목록 초기화 (%d건)", len(self.scanner._excluded))
+            self.scanner.clear_exclusions()
+
         if mode == "opening_wait":
             return
         if mode == "closing" and not self.auto_scan:
@@ -983,7 +991,6 @@ class StockEngine(BaseTradingEngine):
 
             logger.info("[자동스캔] %s %s 매수 시도 (사유: %s)", best.code, best.name, scan_reason)
             if self._buy(scan_reason, current_atr=atr, confidence=sig.confidence):
-                self.scanner.exclude(best.code)
                 try:
                     self.telegram.send(
                         "<b>📡 스캐너 종목 선정</b>\n종목: %s %s\n점수: %.0f\n섹터: %s\n사유: %s"
@@ -1098,25 +1105,59 @@ class StockEngine(BaseTradingEngine):
         return critical_ok
 
     def _restore_today_exclusions(self):
-        """재시작 시 당일 매매한 종목을 스캐너 제외 목록에 복원"""
+        """재시작 시 당일 매도 종목 일부를 스캐너 제외 목록에 복원.
+
+        - 최근 `sell_exclusion_minutes`분 내 매도 종목만 제외
+        - 현재 보유 중인 종목은 제외 대상에서 제거
+        """
         import csv
         import os
         csv_path = "logs/trades.csv"
         if not os.path.exists(csv_path):
             return
         today = datetime.date.today().isoformat()
+        now = datetime.datetime.now()
+        cutoff_min = max(0, int(self.sell_exclusion_minutes))
+        if cutoff_min == 0:
+            logger.info("[복원] 매도 제외 복원 비활성 (sell_exclusion_minutes=0)")
+            return
+
+        # 현재 보유 종목은 제외 복원 대상에서 제외 (부분매도/수동체결 호환)
+        holding_codes = set()
+        balance = self.kis.get_balance() if self.kis.is_authenticated else None
+        if balance:
+            holding_codes = {h.get("code", "") for h in balance.get("holdings", []) if h.get("quantity", 0) > 0}
+
+        restored = []
         try:
             with open(csv_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     dt = row.get("datetime", "")
-                    if dt.startswith(today) and row.get("bot") == "stock_trader":
-                        code = row.get("symbol", "")
-                        if code and row.get("side") == "SELL":
-                            self.scanner.exclude(code)
+                    if not dt.startswith(today) or row.get("bot") != "stock_trader":
+                        continue
+
+                    # 최근 N분 내 매도만 복원. 파싱 실패 시 보수적으로 스킵.
+                    try:
+                        trade_dt = datetime.datetime.strptime(dt, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        continue
+                    age_min = (now - trade_dt).total_seconds() / 60.0
+                    if cutoff_min > 0 and age_min > cutoff_min:
+                        continue
+
+                    code = row.get("symbol", "")
+                    if code and row.get("side") == "SELL" and code not in holding_codes:
+                        self.scanner.exclude(code)
+                        restored.append(code)
             excluded = self.scanner._excluded
             if excluded:
-                logger.info("[복원] 당일 매도 종목 제외: %s", ", ".join(excluded))
+                logger.info("[복원] 최근 %d분 내 매도 제외(%d): %s",
+                            cutoff_min, len(excluded), ", ".join(sorted(excluded)))
+            elif restored:
+                logger.info("[복원] 최근 매도 제외 복원됨 (%d건)", len(restored))
+            else:
+                logger.info("[복원] 최근 %d분 내 제외 복원 대상 없음", cutoff_min)
         except Exception as e:
             logger.debug("[복원] 제외 목록 로드 실패: %s", e)
 
