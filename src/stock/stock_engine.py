@@ -154,6 +154,8 @@ class StockEngine(BaseTradingEngine):
         self._supply_cache_time: float = 0
         self._index_cache = None
         self._index_cache_time: float = 0
+        self._market_filter_cache: dict = {}  # 시장 국면 필터 캐시
+        self._market_filter_time: float = 0
         self._last_report_date = ""
         self._today_open_price: Dict[str, float] = {}
         self._last_block_reason: str = ""
@@ -202,11 +204,44 @@ class StockEngine(BaseTradingEngine):
         if now - self._index_cache_time > 60:
             self._index_cache = self.kis.get_index_price("0001")
             self._index_cache_time = now
+
+        # 1. 코스피 급락 체크
         if self._index_cache:
             idx_change = self._index_cache.get("change_pct", 0)
             if idx_change <= -3.0:
                 return False, "코스피 급락 (%.1f%%)" % idx_change
+
+        # 2. VKOSPI 공포지수 체크 (25 이상 = 패닉)
+        sent = self.sentiment.analyze()
+        if sent.vkospi >= 25:
+            return False, "VKOSPI 공포 (%.1f)" % sent.vkospi
+
+        # 3. 코스피 20일선 체크 (30분마다 갱신)
+        if now - self._market_filter_time > 1800:
+            self._market_filter_cache = self._check_index_ma20()
+            self._market_filter_time = now
+        if self._market_filter_cache.get("below_ma20"):
+            return False, "코스피 20일선 하회 (지수:%.0f < 20MA:%.0f)" % (
+                self._market_filter_cache.get("price", 0),
+                self._market_filter_cache.get("ma20", 0))
+
         return True, ""
+
+    def _check_index_ma20(self) -> dict:
+        """KODEX 200(069500) 일봉으로 코스피 20일선 상태 판단"""
+        try:
+            df = self.kis.get_ohlcv("069500", period="D", count=25)
+            if df is None or len(df) < 20:
+                return {}
+            ma20 = float(df["close"].iloc[-20:].mean())
+            cur_price = float(df["close"].iloc[-1])
+            below = cur_price < ma20
+            if below:
+                logger.info("[MarketFilter] 코스피 20일선 하회: KODEX200 %.0f < MA20 %.0f", cur_price, ma20)
+            return {"below_ma20": below, "price": cur_price, "ma20": ma20}
+        except Exception as e:
+            logger.warning("[MarketFilter] KODEX200 20일선 조회 실패: %s", e)
+            return {}
 
     def _check_supply_demand(self) -> tuple:
         now = time.time()
@@ -1232,6 +1267,7 @@ class StockEngine(BaseTradingEngine):
                      self.take_profit_pct, self.trailing_pct)
         logger.info("  보유: 최대 5거래일 | 보호: 3연속손실→쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  진입: 전일 관심종목 눌림목 매수 (종가-3%% 또는 5MA지지)")
+        logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 하회 차단")
         logger.info("  장: 09:05관망→10:00골든→15:10관심종목스캔")
         logger.info("=" * 60)
 
