@@ -1053,11 +1053,12 @@ class StockEngine(BaseTradingEngine):
                 logger.info("[스윙매수] %s 체결강도 약세 (%.0f%%) → 스킵", item.name, vp)
                 continue
 
-            # ── 분봉 반등 확인 (양봉 2개 연속 + 거래량 유지) ──
+            # ── 분봉 반등 확인 (양봉 2개 + 거래량 + VWAP 탈환) ──
             mdf = self.kis.get_minute_ohlcv(item.code)
+            vwap_ok = False
             if mdf is not None and len(mdf) >= 3:
-                c1 = mdf.iloc[-2]  # 직전 봉
-                c2 = mdf.iloc[-1]  # 최신 봉
+                c1 = mdf.iloc[-2]
+                c2 = mdf.iloc[-1]
                 bull1 = float(c1["close"]) > float(c1["open"])
                 bull2 = float(c2["close"]) > float(c2["open"])
                 vol_ok = float(c2["volume"]) > float(c1["volume"]) * 0.8
@@ -1066,12 +1067,27 @@ class StockEngine(BaseTradingEngine):
                                  item.name, bull1, bull2, vol_ok)
                     continue
 
+                # VWAP 계산: 현재가가 VWAP 위에 있으면 매수세 우위
+                tp = (mdf["high"].astype(float) + mdf["low"].astype(float) + mdf["close"].astype(float)) / 3
+                vol = mdf["volume"].astype(float)
+                cum_vol = vol.cumsum()
+                if cum_vol.iloc[-1] > 0:
+                    vwap = float((tp * vol).cumsum().iloc[-1] / cum_vol.iloc[-1])
+                    latest = float(c2["close"])
+                    vwap_ok = latest >= vwap
+                    if not vwap_ok:
+                        logger.debug("[스윙매수] %s VWAP 하회 (현재:%s < VWAP:%s) → 대기",
+                                     item.name, "{:,}".format(int(latest)), "{:,}".format(int(vwap)))
+                        continue
+
             # ── 매수 실행 ──
             reason_parts = []
             if pullback_ok:
                 reason_parts.append("눌림목(목표%s원도달)" % "{:,}".format(int(item.pullback_target)))
             if ma5_support:
                 reason_parts.append("5MA지지")
+            if vwap_ok:
+                reason_parts.append("VWAP탈환")
             reason_parts.append("관심종목(%.0f점)" % item.score)
             buy_reason = "스윙매수: %s | 원래사유: %s" % (
                 " + ".join(reason_parts), ", ".join(item.reasons[:3]))
