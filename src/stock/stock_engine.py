@@ -1093,6 +1093,7 @@ class StockEngine(BaseTradingEngine):
                 " + ".join(reason_parts), ", ".join(item.reasons[:3]))
 
             old_code = self.stock_code
+            old_name = self._stock_name
             self.stock_code = item.code
             self._stock_name = item.name
             self._supply_cache = None
@@ -1126,6 +1127,7 @@ class StockEngine(BaseTradingEngine):
                     break
             else:
                 self.stock_code = old_code
+                self._stock_name = old_name
 
         if bought_count > 0:
             logger.info("[스윙매수] %d종목 매수 완료", bought_count)
