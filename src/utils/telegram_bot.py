@@ -218,9 +218,9 @@ class TelegramNotifier:
             "대상: <code>%s</code>\n"
             "%s\n"
             "금일 거래: %d건\n"
-            "금일 PnL: <b>%+,.0f원</b>"
+            "금일 PnL: <b>%s원</b>"
             % (emoji, self.escape(ticker), self.escape(hold_info),
-               daily_trades, daily_pnl)
+               daily_trades, "{:+,.0f}".format(daily_pnl))
         )
 
     def notify_arbitrage(self, symbol: str, buy_ex: str, sell_ex: str,
@@ -246,7 +246,7 @@ class TelegramNotifier:
         self.send(
             "<b>🛑 킬스위치 발동</b>\n"
             "일일 손실: <b>-%.1f%%</b>\n"
-            "PnL: %+,.0f원\n"
+            "PnL: %s원\n"
             "당일 매매 중단"
-            % (loss_pct, daily_pnl)
+            % (loss_pct, "{:+,.0f}".format(daily_pnl))
         )
