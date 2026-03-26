@@ -192,7 +192,7 @@ class CombinedStrategy(BaseStrategy):
             if market == "ranging":
                 conf *= 0.8  # 횡보장에서도 감점만
             if is_volatile:
-                conf *= 0.7  # 고변동장: 차단 대신 감점
+                conf *= 0.85  # 고변동장: 차단 대신 감점 (경미)
                 reasons.append("고변동감점")
 
             # 보너스 요소
@@ -219,7 +219,7 @@ class CombinedStrategy(BaseStrategy):
                     reasons.append("HTF_RSI과매도%.0f" % htf_rsi)
 
             tag = " | ".join(reasons) if reasons else "없음"
-            if conf >= 0.45:
+            if conf >= 0.40:
                 return TradeSignal(Signal.BUY, conf,
                                    "매수%s%s: %s" % (mkt_str, htf_str, tag), price)
 
