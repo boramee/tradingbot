@@ -677,7 +677,7 @@ class StockEngine(BaseTradingEngine):
             logger.debug("[자동스캔] 매수 필터 차단: %s", reason)
             return
 
-        candidates = self.scanner.get_candidates(limit=5)
+        candidates = self.scanner.get_candidates(limit=10)
         if not candidates:
             logger.debug("[자동스캔] 스캐너 후보 없음")
             return
