@@ -534,13 +534,13 @@ class KISClient:
     def buy(self, stock_code: str, quantity: int, price: int = 0) -> Optional[Dict]:
         """매수 주문. price=0이면 시장가."""
         tr_id = "VTTC0802U" if self.is_virtual else "TTTC0802U"
-        ord_type = "01" if price > 0 else "06"
+        ord_type = "00" if price > 0 else "01"  # 00=지정가, 01=시장가
         return self._order(tr_id, stock_code, "buy", ord_type, quantity, price)
 
     def sell(self, stock_code: str, quantity: int, price: int = 0) -> Optional[Dict]:
         """매도 주문. price=0이면 시장가."""
         tr_id = "VTTC0801U" if self.is_virtual else "TTTC0801U"
-        ord_type = "01" if price > 0 else "06"
+        ord_type = "00" if price > 0 else "01"  # 00=지정가, 01=시장가
         return self._order(tr_id, stock_code, "sell", ord_type, quantity, price)
 
     def _order(
