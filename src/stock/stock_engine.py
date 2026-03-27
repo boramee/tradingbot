@@ -141,7 +141,7 @@ class StockEngine(BaseTradingEngine):
         self.sentiment = MarketSentiment(self.kis)
         self.watchlist = Watchlist()
         self.investor_flow = InvestorFlow()
-        self.multi_scanner = MultiSourceScanner()
+        self.multi_scanner = MultiSourceScanner(kis_client=self.kis)
         self.position = StockPosition(code=stock_code)  # 호환용 (고정종목 모드)
         self.positions: Dict[str, StockPosition] = {}  # 멀티 종목 포지션
         self.max_positions = 3  # 최대 동시 보유 종목 수
@@ -1591,7 +1591,7 @@ class StockEngine(BaseTradingEngine):
         logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 -5%%이상 하회 차단 (소폭하회: A등급만 허용)")
         logger.info("  수급필터: 외국인 3일연속 순매도 종목 제외 (pykrx)")
         logger.info("  스캔: 1시간 주기 (09~14시) + 15:10 마감 + 회복긴급 (멀티소스)")
-        logger.info("  소스: 거래량순위 + 외인순매수 + 기관순매수 + 52주신고가 + 낙폭과대")
+        logger.info("  소스: 거래량순위 + 수급강세(외인/기관) + 낙폭과대 (KIS API)")
         logger.info("  만료: A등급 7일, B등급 5일, C등급 3일")
         logger.info("=" * 60)
 
