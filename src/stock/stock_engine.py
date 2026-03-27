@@ -564,7 +564,7 @@ class StockEngine(BaseTradingEngine):
         if not mkt_ok:
             if not self._last_block_reason.startswith("코스피"):
                 try:
-                    self.telegram.send("<b>🚫 매수 차단</b>\n사유: %s" % mkt_reason)
+                    self.telegram.send("<b>🚫 매수 차단</b>\n사유: %s" % self.telegram.escape(mkt_reason))
                 except Exception:
                     pass
             self._last_block_reason = mkt_reason
