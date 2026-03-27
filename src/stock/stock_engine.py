@@ -39,7 +39,8 @@ from src.utils.safety import KillSwitch, TradeLogger
 from src.utils.daily_report import DailyReport
 from src.trader.base_engine import BaseTradingEngine
 from .kis_client import KISClient
-from .scanner import StockScanner
+from .scanner import StockScanner, ScanResult
+from .scanner.multi_source import MultiSourceScanner
 from .watchlist import Watchlist, WatchItem, assign_grade
 from .investor_flow import InvestorFlow
 from src.intelligence.market_sentiment import MarketSentiment
@@ -140,6 +141,7 @@ class StockEngine(BaseTradingEngine):
         self.sentiment = MarketSentiment(self.kis)
         self.watchlist = Watchlist()
         self.investor_flow = InvestorFlow()
+        self.multi_scanner = MultiSourceScanner()
         self.position = StockPosition(code=stock_code)  # 호환용 (고정종목 모드)
         self.positions: Dict[str, StockPosition] = {}  # 멀티 종목 포지션
         self.max_positions = 3  # 최대 동시 보유 종목 수
@@ -944,84 +946,120 @@ class StockEngine(BaseTradingEngine):
         self._run_swing_buy(now, today)
 
     def _scan_watchlist(self, today: str, scan_type: str = "normal"):
-        """관심종목 스캔 (일반/방어/회복)
+        """관심종목 스캔 (일반/방어/회복) — 멀티소스 통합
 
         scan_type:
-          normal   — 정상 시장, 스캐너 상위 종목 스캔
-          defensive — 하락장, 낙폭과대 반등 후보만 C등급으로 저장
-          recovery — 시장 회복 직후, 기존 관심종목 재점검 + 신규 스캔
+          normal   — 거래량 스캐너 + 멀티소스(외인/기관/52주/낙폭) 병합
+          defensive — 하락장, 낙폭과대 위주 (멀티소스 oversold + 거래량)
+          recovery — 시장 회복, 전 소스 스캔
         """
         mkt_ok, mkt_reason = self._check_market_conditions()
 
-        # 하락장이면 방어 스캔으로 전환
         if not mkt_ok and scan_type == "normal":
             scan_type = "defensive"
             logger.info("[관심종목] 하락장 (%s) → 방어 스캔 전환", mkt_reason)
 
         logger.info("[관심종목] %s 스캔 시작 (%s)", scan_type, today)
 
-        if scan_type == "defensive":
-            candidates = self._scan_defensive_candidates()
-        else:
-            candidates = self.scanner.get_candidates(limit=15)
+        # ── 1. 소스별 후보 수집 ──
+        all_candidates: Dict[str, dict] = {}  # code → {score, reasons, source, ...}
 
-        if not candidates:
-            logger.info("[관심종목] 스캐너 후보 없음 (%s)", scan_type)
+        # 1a. 기존 거래량 스캐너 (장중 실시간 데이터)
+        if scan_type != "defensive":
+            volume_cands = self.scanner.get_candidates(limit=15)
+            for c in volume_cands:
+                if c.change_pct >= 15 or c.change_pct < 2:
+                    continue
+                if c.trade_value < 10_000_000_000:
+                    continue
+                all_candidates[c.code] = {
+                    "code": c.code, "name": c.name, "price": c.price,
+                    "change_pct": c.change_pct, "trade_value": c.trade_value,
+                    "score": c.score, "reasons": list(c.reasons),
+                    "source": "volume",
+                }
+            logger.info("[관심종목] 거래량 스캐너: %d종목", len(all_candidates))
+
+        # 1b. 멀티소스 (pykrx — 외인/기관/52주/낙폭)
+        try:
+            multi_cands = self.multi_scanner.get_merged_candidates(limit=15)
+            added_multi = 0
+            for mc in multi_cands:
+                if mc.code in all_candidates:
+                    # 기존에 있으면 점수 합산 + 소스 태그 추가
+                    existing = all_candidates[mc.code]
+                    existing["score"] += mc.score
+                    existing["reasons"].extend(mc.reasons)
+                    existing["source"] += "+" + mc.source
+                else:
+                    all_candidates[mc.code] = {
+                        "code": mc.code, "name": mc.name, "price": mc.price,
+                        "change_pct": mc.change_pct, "trade_value": mc.trade_value,
+                        "score": mc.score, "reasons": list(mc.reasons),
+                        "source": mc.source,
+                    }
+                    added_multi += 1
+            logger.info("[관심종목] 멀티소스 추가: %d종목 (병합: %d, 신규: %d)",
+                        len(multi_cands), len(multi_cands) - added_multi, added_multi)
+        except Exception as e:
+            logger.warning("[관심종목] 멀티소스 스캔 실패: %s", e)
+
+        if not all_candidates:
+            logger.info("[관심종목] 전체 후보 없음 (%s)", scan_type)
             return
 
+        # ── 2. 후보별 상세 분석 + WatchItem 생성 ──
         watch_items = []
-        for best in candidates:
-            if scan_type != "defensive":
-                # 정상/회복 스캔: 급등주 제외
-                if best.change_pct >= 15 or best.change_pct < 2:
-                    continue
-                if best.trade_value < 10_000_000_000:
-                    continue
-
+        for code, info in sorted(all_candidates.items(), key=lambda x: -x[1]["score"]):
             # 이평선 계산
-            ma5, ma20 = self._calc_moving_averages(best.code)
+            ma5, ma20 = self._calc_moving_averages(code)
 
             # 눌림목 목표가
-            if scan_type == "defensive":
-                # 방어 스캔: 현재 가격 근처 (추가 -2% 하락 시 매수)
-                pullback = int(best.price * 0.98)
+            if scan_type == "defensive" or "oversold" in info.get("source", ""):
+                pullback = int(info["price"] * 0.98)
             else:
-                pullback = max(int(best.price * 0.97), int(ma5)) if ma5 > 0 else int(best.price * 0.97)
+                pullback = max(int(info["price"] * 0.97), int(ma5)) if ma5 > 0 else int(info["price"] * 0.97)
 
-            # 수급 체크
-            foreign_flow, inst_flow, flow_bonus, both_buying = self._check_investor_flow(best)
-            if foreign_flow is None:  # 외인 3일 연속 순매도 → 제외
+            # 수급 체크 (개별 종목 상세)
+            class _Stub:
+                pass
+            stub = _Stub()
+            stub.code = code
+            stub.name = info["name"]
+            foreign_flow, inst_flow, flow_bonus, both_buying = self._check_investor_flow(stub)
+            if foreign_flow is None:
                 continue
 
-            total_score = best.score + flow_bonus
+            total_score = info["score"] + flow_bonus
             grade = assign_grade(total_score, foreign_flow, both_buying)
 
-            # 방어 스캔은 최대 C등급
             if scan_type == "defensive":
                 grade = "C"
 
+            reasons = info["reasons"][:6]
+            if flow_bonus > 0:
+                reasons.append("수급+%d" % flow_bonus)
+            source_tag = info.get("source", "")
+            if "+" in source_tag:
+                reasons.append("소스:%s" % source_tag)
+
             item = WatchItem(
-                code=best.code,
-                name=best.name,
-                close=best.price,
-                change_pct=best.change_pct,
-                score=total_score,
-                reasons=best.reasons[:5] + (["수급+%d" % flow_bonus] if flow_bonus > 0 else []),
-                trade_value=best.trade_value,
-                ma5=ma5,
-                ma20=ma20,
-                pullback_target=pullback,
-                foreign_flow=foreign_flow,
-                inst_flow=inst_flow,
-                grade=grade,
-                scan_type=scan_type,
+                code=code, name=info["name"], close=info["price"],
+                change_pct=info["change_pct"], score=total_score,
+                reasons=reasons, trade_value=info["trade_value"],
+                ma5=ma5, ma20=ma20, pullback_target=pullback,
+                foreign_flow=foreign_flow, inst_flow=inst_flow,
+                grade=grade, scan_type=scan_type,
             )
             watch_items.append(item)
-            logger.info("[관심종목] [%s] %s %s | %s원 | 목표:%s원 | %.0f점 | 외인:%+d 기관:%+d",
-                        grade, best.code, best.name,
-                        "{:,}".format(best.price),
+            logger.info("[관심종목] [%s] %s %s | %s원 | 목표:%s원 | %.0f점 | %s",
+                        grade, code, info["name"],
+                        "{:,}".format(info["price"]),
                         "{:,}".format(pullback),
-                        total_score, foreign_flow, inst_flow)
+                        total_score, source_tag)
+
+            if len(watch_items) >= 15:
+                break
 
         if watch_items:
             self.watchlist.update_candidates(watch_items, today)
@@ -1516,7 +1554,8 @@ class StockEngine(BaseTradingEngine):
         logger.info("  진입: 관심종목 등급제(A/B/C) 눌림목 매수")
         logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 하회 차단")
         logger.info("  수급필터: 외국인 3일연속 순매도 종목 제외 (pykrx)")
-        logger.info("  스캔: 11:00 오전스캔 + 15:10 마감스캔 + 시장회복 긴급스캔")
+        logger.info("  스캔: 11:00 오전 + 15:10 마감 + 회복긴급 (멀티소스)")
+        logger.info("  소스: 거래량순위 + 외인순매수 + 기관순매수 + 52주신고가 + 낙폭과대")
         logger.info("  만료: A등급 7일, B등급 5일, C등급 3일")
         logger.info("=" * 60)
 
