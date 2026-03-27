@@ -1703,20 +1703,21 @@ class StockEngine(BaseTradingEngine):
         # 관심종목 상세
         today = datetime.date.today().isoformat()
         watchlist_active = self.watchlist.get_active(today)
+        total_alive = len([c for c in self.watchlist.candidates
+                           if not c.expired and c.status not in ("expired", "bought")])
         if watchlist_active:
             grade_counts = {"A": 0, "B": 0, "C": 0}
-            status_counts = {"waiting": 0, "approaching": 0, "reached": 0}
             for w in watchlist_active:
                 grade_counts[w.grade] = grade_counts.get(w.grade, 0) + 1
-                if w.status in status_counts:
-                    status_counts[w.status] += 1
-            wl = "관심 %d개(A:%d B:%d C:%d)" % (
-                len(watchlist_active), grade_counts["A"], grade_counts["B"], grade_counts["C"])
-            # 접근 중이거나 목표 도달 종목이 있으면 표시
+            wl = "관심 %d/%d개(A:%d B:%d C:%d)" % (
+                len(watchlist_active), total_alive,
+                grade_counts["A"], grade_counts["B"], grade_counts["C"])
             hot = [w for w in watchlist_active if w.status in ("approaching", "reached")]
             if hot:
                 hot_str = " ".join("%s(%s)" % (w.name, w.status_label) for w in hot[:3])
                 wl += " 🎯%s" % hot_str
+        elif total_alive > 0:
+            wl = "관심 0/%d개(신규대기)" % total_alive
         else:
             wl = "관심종목 없음"
 
