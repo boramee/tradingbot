@@ -14,7 +14,7 @@ PIDFILE="$DIR/.stock_bot.pid"
 
 # 기본 설정
 CODE="${CODE:-005930}"           # 종목코드 (삼성전자)
-STRATEGY="${STRATEGY:-macd}"
+STRATEGY="${STRATEGY:-combined}"
 INVEST_RATIO="${INVEST_RATIO:-0.2}"
 MAX_INVEST="${MAX_INVEST:-300000}"
 SCAN="${SCAN:-1}"                 # 기본: 자동스캔. 끄려면 SCAN=0
@@ -37,12 +37,13 @@ start() {
     [ "$REAL" = "1" ] && TRADE_MODE="실전"
 
     echo "============================="
-    echo "  주식 자동매매 봇 시작"
+    echo "  주식 스윙 봇 v6 시작"
     echo "  종목: $SCAN_LABEL"
-    echo "  전략: $STRATEGY"
+    echo "  전략: Swing (눌림목 매수)"
     echo "  모드: $TRADE_MODE"
     echo "  투자비율: ${INVEST_RATIO}"
     echo "  최대투자: ${MAX_INVEST}원"
+    echo "  손절: -3% | 익절: +5% | 트레일링: -2%"
     echo "============================="
 
     source "$DIR/venv/bin/activate" 2>/dev/null
