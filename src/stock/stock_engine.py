@@ -921,11 +921,13 @@ class StockEngine(BaseTradingEngine):
             self._scan_watchlist(today, "normal")
             self._closing_scan_done = today
 
-        # 3c. 시장 회복 트리거 — 이전에 차단됐다가 회복되면 긴급 스캔
+        # 3c. 시장 회복 트리거 — 이전에 차단됐다가 회복되면 긴급 스캔 (1회만)
         mkt_ok, _ = self._check_market_conditions()
         if self._last_market_blocked and mkt_ok:
-            logger.info("[관심종목] 시장 회복 감지 → 긴급 스캔")
-            self._scan_watchlist(today, "recovery")
+            if not getattr(self, '_recovery_scan_done', None) == today:
+                logger.info("[관심종목] 시장 회복 감지 → 긴급 스캔")
+                self._scan_watchlist(today, "recovery")
+                self._recovery_scan_done = today
         self._last_market_blocked = not mkt_ok
 
         # 3d. 관심종목 상태 갱신 (현재가 기반)
@@ -985,6 +987,9 @@ class StockEngine(BaseTradingEngine):
             multi_cands = self.multi_scanner.get_merged_candidates(limit=15)
             added_multi = 0
             for mc in multi_cands:
+                # price=0이면 pullback_target이 0이 되어 위험 → 스킵
+                if mc.price <= 0:
+                    continue
                 if mc.code in all_candidates:
                     # 기존에 있으면 점수 합산 + 소스 태그 추가
                     existing = all_candidates[mc.code]

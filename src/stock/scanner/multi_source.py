@@ -192,6 +192,11 @@ class MultiSourceScanner:
             for code, row in top.iterrows():
                 try:
                     name = str(row.get("종목명", ""))
+                    if not name:
+                        try:
+                            name = pykrx_stock.get_market_ticker_name(code)
+                        except Exception:
+                            name = code
                     if any(kw in name for kw in ETF_KEYWORDS):
                         continue
                     net_amount = _safe_int(row[net_col])
@@ -293,7 +298,7 @@ class MultiSourceScanner:
                 checked += 1
 
                 try:
-                    hist = pykrx_stock.get_market_ohlcv(year_ago_str, last_bd_str, code)
+                    hist = pykrx_stock.get_market_ohlcv_by_date(year_ago_str, last_bd_str, code)
                 except Exception:
                     continue
                 if hist is None or len(hist) < 20:
