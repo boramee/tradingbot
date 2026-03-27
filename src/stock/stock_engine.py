@@ -164,6 +164,7 @@ class StockEngine(BaseTradingEngine):
         self._last_block_time: float = 0
         self._last_heartbeat: float = 0
         self._last_offhour_heartbeat: float = 0
+        self._last_status_log: float = 0
         self._market_open_notified: str = ""  # 장 시작 알림 날짜
         self._market_close_notified: bool = False
         # 재진입 차단 복원 범위(분): 기본 0(복원 비활성, 스캔 우선)
@@ -1378,6 +1379,7 @@ class StockEngine(BaseTradingEngine):
             try:
                 if self.is_market_open():
                     self.run_once()
+                    self._status_log()
                     self._heartbeat()
                 else:
                     now = datetime.datetime.now()
@@ -1405,6 +1407,56 @@ class StockEngine(BaseTradingEngine):
                     time.sleep(1)
 
         logger.info("봇 종료")
+
+    def _status_log(self):
+        """5분마다 현재 상태를 로그에 한 줄로 출력"""
+        now = time.time()
+        if now - self._last_status_log < 300:
+            return
+        self._last_status_log = now
+
+        mode = self.get_trading_mode()
+        mode_kr = {
+            "opening_wait": "관망(09:00~10:00)",
+            "golden_hour": "골든타임(10:00~14:00)",
+            "normal": "일반(14:00~15:10)",
+            "closing": "마감전(15:10~15:20)",
+            "closed": "장마감",
+        }.get(mode, mode)
+
+        # 보유 종목
+        active = {c: p for c, p in self.positions.items() if p.quantity > 0}
+        if active:
+            parts = []
+            for code, pos in active.items():
+                info = self.kis.get_current_price(code)
+                pnl = self.calc_pnl(pos.avg_price, info["price"]) if info else 0
+                parts.append("%s(%+.1f%%)" % (pos.name or code, pnl))
+            hold = "보유 %d/%d [%s]" % (len(active), self.max_positions, ", ".join(parts))
+        elif self.position.is_holding:
+            price = self._get_price()
+            pnl = self._calc_pnl(price) if price > 0 else 0
+            hold = "보유 %s(%+.1f%%)" % (self._stock_name or self.stock_code, pnl)
+        else:
+            hold = "보유 없음"
+
+        # 시장 상태
+        mkt_parts = []
+        if self._index_cache:
+            mkt_parts.append("코스피%+.1f%%" % self._index_cache.get("change_pct", 0))
+        if self._market_filter_cache.get("below_ma20"):
+            mkt_parts.append("20일선↓차단")
+        if self._last_block_reason:
+            mkt_parts.append("차단:%s" % self._last_block_reason)
+        mkt = " | ".join(mkt_parts) if mkt_parts else "정상"
+
+        # 관심종목
+        today = datetime.date.today().isoformat()
+        watchlist_active = self.watchlist.get_active(today)
+        wl = "관심종목 %d개" % len(watchlist_active) if watchlist_active else "관심종목 없음"
+
+        logger.info("[상태] %s | %s | %s | 시장:%s | 거래:%d건",
+                    mode_kr, hold, wl, mkt, self._daily_trades)
 
     def _heartbeat(self):
         """매 시간 정각에 상태 로그 + 텔레그램"""
@@ -1452,7 +1504,8 @@ class StockEngine(BaseTradingEngine):
         if now - self._last_offhour_heartbeat < 10800:  # 3h
             return
         self._last_offhour_heartbeat = now
-        logger.info("[대기 중] 장외 시간 — 봇 정상 작동")
+        next_open = "월요일 09:00" if datetime.datetime.now().weekday() >= 4 else "내일 09:00"
+        logger.info("[대기 중] 장외 시간 — 다음 개장: %s | 봇 정상 작동", next_open)
 
     def _send_daily_report_if_needed(self):
         import datetime as dt
