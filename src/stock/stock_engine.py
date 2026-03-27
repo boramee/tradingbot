@@ -230,9 +230,9 @@ class StockEngine(BaseTradingEngine):
             self._market_filter_cache = self._check_index_ma20()
             self._market_filter_time = now
         if self._market_filter_cache.get("below_ma20"):
-            return False, "코스피 20일선 하회 (지수:%.0f < 20MA:%.0f)" % (
-                self._market_filter_cache.get("price", 0),
-                self._market_filter_cache.get("ma20", 0))
+            return False, "코스피 20일선 하회 (KODEX200:%s원 < 20MA:%s원)" % (
+                "{:,}".format(int(self._market_filter_cache.get("price", 0))),
+                "{:,}".format(int(self._market_filter_cache.get("ma20", 0))))
 
         return True, ""
 
