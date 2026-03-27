@@ -491,7 +491,7 @@ class KISClient:
             return 200.0 if buy_vol > 0 else 100.0
         except Exception as e:
             logger.debug("[KIS] 체결강도 조회 실패 [%s]: %s", stock_code, e)
-            return 0.0
+            return -1.0  # 조회 실패 시 -1 (호출부에서 스킵 판단)
 
     def get_index_price(self, index_code: str = "0001") -> Optional[Dict]:
         """코스피/코스닥 지수 조회. 0001=코스피, 1001=코스닥"""

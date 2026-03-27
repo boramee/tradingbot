@@ -167,17 +167,20 @@ class Watchlist:
             item.added_date = item.added_date or date
             if item.code in existing:
                 old = existing[item.code]
-                # 재발굴: 점수가 더 높으면 등급 승격 + 만료일 갱신
-                if item.score > old.score:
-                    old_grade = old.grade
-                    old.score = item.score
-                    old.grade = item.grade
+                old_grade = old.grade
+                # 재발굴: 등급이 높아졌거나 점수가 더 높으면 갱신
+                grade_up = item.grade < old_grade  # A < B < C 문자열 비교
+                score_up = item.score > old.score
+                if grade_up or score_up:
+                    old.score = max(item.score, old.score)
+                    if grade_up:
+                        old.grade = item.grade
                     old.reasons = item.reasons
                     old.added_date = date  # 만료일 리셋
-                    if old_grade > item.grade:  # A < B < C 문자열 비교
+                    if grade_up:
                         upgraded += 1
                         logger.info("[관심종목] %s 등급 승격: %s→%s (점수:%.0f)",
-                                    old.name, old_grade, item.grade, item.score)
+                                    old.name, old_grade, old.grade, old.score)
             else:
                 existing[item.code] = item
                 added += 1

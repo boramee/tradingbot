@@ -276,7 +276,7 @@ class StockEngine(BaseTradingEngine):
 
     def _check_volume_power(self) -> tuple:
         vp = self.kis.get_volume_power(self.stock_code)
-        if 0 < vp < 80:
+        if 0 <= vp < 80:
             return False, "체결강도 약세 (%.0f%%)" % vp
         return True, ""
 
@@ -1332,9 +1332,9 @@ class StockEngine(BaseTradingEngine):
                                 item.name, today_vol / prev_vol)
                     continue
 
-            # ── 체결강도 체크 ──
+            # ── 체결강도 체크 (조회 실패 시 통과) ──
             vp = self.kis.get_volume_power(item.code)
-            if vp < 70:
+            if 0 <= vp < 70:
                 logger.info("[스윙매수] %s 체결강도 약세 (%.0f%%) → 스킵", item.name, vp)
                 continue
 
