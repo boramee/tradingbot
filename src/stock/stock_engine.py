@@ -230,9 +230,18 @@ class StockEngine(BaseTradingEngine):
             self._market_filter_cache = self._check_index_ma20()
             self._market_filter_time = now
         if self._market_filter_cache.get("below_ma20"):
-            return False, "코스피 20일선 하회 (KODEX200:%s원 < 20MA:%s원)" % (
-                "{:,}".format(int(self._market_filter_cache.get("price", 0))),
-                "{:,}".format(int(self._market_filter_cache.get("ma20", 0))))
+            price = self._market_filter_cache.get("price", 0)
+            ma20 = self._market_filter_cache.get("ma20", 0)
+            gap_pct = (price - ma20) / ma20 * 100 if ma20 > 0 else 0
+            # -3% 이상 벌어져야 차단 (소폭 하회는 허용)
+            if gap_pct <= -3:
+                return False, "코스피 20일선 -%.1f%% 하회 (KODEX200:%s원 < 20MA:%s원)" % (
+                    abs(gap_pct),
+                    "{:,}".format(int(price)),
+                    "{:,}".format(int(ma20)))
+            else:
+                # 소폭 하회: 경고만 (B/C 등급은 _pre_buy_checks에서 추가 필터)
+                return True, "20일선 소폭 하회 (%.1f%%)" % gap_pct
 
         return True, ""
 
@@ -1248,6 +1257,9 @@ class StockEngine(BaseTradingEngine):
             logger.debug("[스윙매수] 매수 필터 차단: %s", reason)
             return
 
+        # 20일선 소폭 하회 시 C등급 차단 (A/B만 허용)
+        ma20_weak = "20일선 소폭 하회" in reason if ok else False
+
         active = self.watchlist.get_active(today)
         if not active:
             logger.debug("[스윙매수] 활성 관심종목 없음")
@@ -1255,6 +1267,11 @@ class StockEngine(BaseTradingEngine):
 
         bought_count = 0
         for item in active:
+            # 20일선 소폭 하회 시: A등급만 매수 허용
+            if ma20_weak and item.grade != "A":
+                logger.debug("[스윙매수] %s [%s] 20일선 하회 구간 — A등급만 허용", item.name, item.grade)
+                continue
+
             # 이미 보유 중이면 스킵
             if item.code in self.positions and self.positions[item.code].quantity > 0:
                 continue
@@ -1565,7 +1582,7 @@ class StockEngine(BaseTradingEngine):
                      self.take_profit_pct, self.trailing_pct)
         logger.info("  보유: 최대 5거래일 | 보호: 3연속손실→쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  진입: 관심종목 등급제(A/B/C) 눌림목 매수")
-        logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 하회 차단")
+        logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 -3%%이상 하회 차단 (소폭하회: A등급만 허용)")
         logger.info("  수급필터: 외국인 3일연속 순매도 종목 제외 (pykrx)")
         logger.info("  스캔: 1시간 주기 (09~14시) + 15:10 마감 + 회복긴급 (멀티소스)")
         logger.info("  소스: 거래량순위 + 외인순매수 + 기관순매수 + 52주신고가 + 낙폭과대")
@@ -1666,7 +1683,13 @@ class StockEngine(BaseTradingEngine):
         if self._index_cache:
             mkt_parts.append("코스피%+.1f%%" % self._index_cache.get("change_pct", 0))
         if self._market_filter_cache.get("below_ma20"):
-            mkt_parts.append("20일선↓차단")
+            price = self._market_filter_cache.get("price", 0)
+            ma20 = self._market_filter_cache.get("ma20", 0)
+            gap = (price - ma20) / ma20 * 100 if ma20 > 0 else 0
+            if gap <= -3:
+                mkt_parts.append("20일선↓차단(%.1f%%)" % gap)
+            else:
+                mkt_parts.append("20일선↓소폭(%.1f%%,A만허용)" % gap)
         if self._last_block_reason:
             mkt_parts.append("차단:%s" % self._last_block_reason)
         mkt = " | ".join(mkt_parts) if mkt_parts else "정상"
