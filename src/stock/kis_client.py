@@ -107,33 +107,40 @@ class KISClient:
     # ── 시세 조회 ──
 
     def get_current_price(self, stock_code: str) -> Optional[Dict]:
-        """현재가 조회"""
-        try:
-            resp = requests.get(
-                "%s/uapi/domestic-stock/v1/quotations/inquire-price" % self.base_url,
-                headers=self._headers("FHKST01010100"),
-                params={
-                    "FID_COND_MRKT_DIV_CODE": "J",
-                    "FID_INPUT_ISCD": stock_code,
-                },
-                timeout=10,
-            )
-            data = resp.json()
-            output = data.get("output", {})
-            if not output:
+        """현재가 조회 (타임아웃 시 1회 재시도)"""
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    "%s/uapi/domestic-stock/v1/quotations/inquire-price" % self.base_url,
+                    headers=self._headers("FHKST01010100"),
+                    params={
+                        "FID_COND_MRKT_DIV_CODE": "J",
+                        "FID_INPUT_ISCD": stock_code,
+                    },
+                    timeout=10,
+                )
+                data = resp.json()
+                output = data.get("output", {})
+                if not output:
+                    return None
+                return {
+                    "price": int(output.get("stck_prpr", 0)),
+                    "open": int(output.get("stck_oprc", 0)),
+                    "high": int(output.get("stck_hgpr", 0)),
+                    "low": int(output.get("stck_lwpr", 0)),
+                    "volume": int(output.get("acml_vol", 0)),
+                    "change_pct": float(output.get("prdy_ctrt", 0)),
+                    "name": output.get("hts_kor_isnm", ""),
+                }
+            except requests.exceptions.Timeout:
+                if attempt == 0:
+                    logger.debug("[KIS] 현재가 타임아웃 [%s], 재시도", stock_code)
+                    continue
+                logger.warning("[KIS] 현재가 조회 타임아웃 [%s]", stock_code)
                 return None
-            return {
-                "price": int(output.get("stck_prpr", 0)),
-                "open": int(output.get("stck_oprc", 0)),
-                "high": int(output.get("stck_hgpr", 0)),
-                "low": int(output.get("stck_lwpr", 0)),
-                "volume": int(output.get("acml_vol", 0)),
-                "change_pct": float(output.get("prdy_ctrt", 0)),
-                "name": output.get("hts_kor_isnm", ""),
-            }
-        except Exception as e:
-            logger.error("[KIS] 현재가 조회 실패 [%s]: %s", stock_code, e)
-            return None
+            except Exception as e:
+                logger.error("[KIS] 현재가 조회 실패 [%s]: %s", stock_code, e)
+                return None
 
     def get_ohlcv(
         self, stock_code: str, period: str = "D", count: int = 100
