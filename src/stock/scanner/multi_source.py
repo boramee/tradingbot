@@ -22,6 +22,44 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# ── pykrx 내부 buggy 에러 핸들러 무력화 ──
+# pykrx/website/comm/util.py의 except에서 logging.info(args, kwargs)를
+# 잘못 호출 → Python logging TypeError → 대형 traceback 출력.
+# 해결: logging.Handler.handleError를 오버라이드해서 pykrx 출처 에러만 무시.
+def _suppress_pykrx_logging_noise():
+    """pykrx 내부의 buggy 로깅 2종류를 차단:
+    1. logging.info(args, kwargs) → handleError 대형 traceback
+    2. logging.info("Expecting value...") → 불필요한 에러 메시지
+    """
+    # 1. handleError 오버라이드: pykrx buggy call 패턴만 무시
+    _orig_handle_error = logging.Handler.handleError
+
+    def _filtered_handle_error(self, record):
+        try:
+            if 'pykrx' in getattr(record, 'pathname', ''):
+                return
+            if record.args and isinstance(record.args, tuple):
+                if any(isinstance(a, dict) for a in record.args):
+                    return
+        except Exception:
+            pass
+        _orig_handle_error(self, record)
+
+    logging.Handler.handleError = _filtered_handle_error
+
+    # 2. root logger 필터: pykrx의 "Expecting value" 스팸 차단
+    class _PykrxFilter(logging.Filter):
+        def filter(self, record):
+            msg = str(getattr(record, 'msg', ''))
+            if 'Expecting value' in msg and not getattr(record, 'name', '').startswith('src.'):
+                return False
+            return True
+
+    logging.getLogger().addFilter(_PykrxFilter())
+
+_suppress_pykrx_logging_noise()
+
 # 공통 필터
 MIN_PRICE = 2000           # 2천원 미만 제외 (잡주)
 MIN_MARKET_CAP = 300_000_000_000  # 시가총액 3000억 이상
