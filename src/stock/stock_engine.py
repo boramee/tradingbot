@@ -172,7 +172,7 @@ class StockEngine(BaseTradingEngine):
         # 재진입 차단 복원 범위(분): 기본 0(복원 비활성, 스캔 우선)
         self.sell_exclusion_minutes = 0
         # 관심종목 스캔 관리
-        self._morning_scan_done: str = ""    # 오전 스캔 완료 날짜
+        self._last_hourly_scan: str = ""     # 마지막 정기 스캔 시각 (날짜_시)
         self._closing_scan_done: str = ""    # 마감 스캔 완료 날짜 (기존 _watchlist_saved_today 대체)
         self._last_market_blocked: bool = False  # 이전 사이클 시장 차단 여부 (회복 감지용)
 
@@ -904,24 +904,32 @@ class StockEngine(BaseTradingEngine):
             self._stock_name = saved_name
             self.position = saved_pos
 
-        # ── 3. 관심종목 스캔 (장중 2회 + 회복 트리거) ──
+        # ── 3. 관심종목 스캔 (1시간 주기 + 회복 트리거) ──
         today = datetime.date.today().isoformat()
         now_t = datetime.datetime.now()
 
-        # 3a. 오전 스캔 (11:00~11:10) — 장 초반 주도주 포착
-        if (now_t.hour == 11 and now_t.minute < 10
-                and self._morning_scan_done != today):
-            logger.info("[관심종목] 오전 스캔 시작 (장 초반 주도주)")
-            self._scan_watchlist(today, "normal")
-            self._morning_scan_done = today
+        # 3a. 정기 스캔 — 장중 1시간마다 (09:30, 10:30, 11:30, 12:30, 13:30, 14:30, 15:10)
+        scan_due = False
+        if mode == "closing" and self._closing_scan_done != today:
+            scan_due = True
+        elif now_t.minute < 10:
+            hour_key = "%s_%02d" % (today, now_t.hour)
+            last_hourly = getattr(self, '_last_hourly_scan', "")
+            if hour_key != last_hourly and 9 <= now_t.hour <= 14:
+                scan_due = True
 
-        # 3b. 마감 스캔 (15:10~15:20) — 내일 매수 후보
-        if (mode == "closing" and self._closing_scan_done != today):
-            logger.info("[관심종목] 마감 스캔 시작 (내일 매수 후보)")
-            self._scan_watchlist(today, "normal")
-            self._closing_scan_done = today
+        if scan_due:
+            if mode == "closing":
+                logger.info("[관심종목] 마감 스캔 시작 (내일 매수 후보)")
+                self._scan_watchlist(today, "normal")
+                self._closing_scan_done = today
+            else:
+                hour_key = "%s_%02d" % (today, now_t.hour)
+                logger.info("[관심종목] 정기 스캔 시작 (%02d시)", now_t.hour)
+                self._scan_watchlist(today, "normal")
+                self._last_hourly_scan = hour_key
 
-        # 3c. 시장 회복 트리거 — 이전에 차단됐다가 회복되면 긴급 스캔 (1회만)
+        # 3b. 시장 회복 트리거 — 이전에 차단됐다가 회복되면 긴급 스캔 (1회만)
         mkt_ok, _ = self._check_market_conditions()
         if self._last_market_blocked and mkt_ok:
             if not getattr(self, '_recovery_scan_done', None) == today:
@@ -1559,7 +1567,7 @@ class StockEngine(BaseTradingEngine):
         logger.info("  진입: 관심종목 등급제(A/B/C) 눌림목 매수")
         logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 하회 차단")
         logger.info("  수급필터: 외국인 3일연속 순매도 종목 제외 (pykrx)")
-        logger.info("  스캔: 11:00 오전 + 15:10 마감 + 회복긴급 (멀티소스)")
+        logger.info("  스캔: 1시간 주기 (09~14시) + 15:10 마감 + 회복긴급 (멀티소스)")
         logger.info("  소스: 거래량순위 + 외인순매수 + 기관순매수 + 52주신고가 + 낙폭과대")
         logger.info("  만료: A등급 7일, B등급 5일, C등급 3일")
         logger.info("=" * 60)
