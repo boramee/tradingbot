@@ -983,21 +983,27 @@ class StockEngine(BaseTradingEngine):
         # ── 1. 소스별 후보 수집 ──
         all_candidates: Dict[str, dict] = {}  # code → {score, reasons, source, ...}
 
-        # 1a. 기존 거래량 스캐너 (장중 실시간 데이터)
-        if scan_type != "defensive":
-            volume_cands = self.scanner.get_candidates(limit=15)
-            for c in volume_cands:
+        # 1a. 거래량 스캐너 (KIS API — 장중 실시간)
+        volume_cands = self.scanner.get_candidates(limit=15)
+        for c in volume_cands:
+            if scan_type == "defensive":
+                # 방어 모드: 급등주 제외, 소폭 상승만 (0~5%)
+                if c.change_pct >= 5 or c.change_pct < 0:
+                    continue
+                if c.trade_value < 20_000_000_000:  # 200억 이상 (더 보수적)
+                    continue
+            else:
                 if c.change_pct >= 15 or c.change_pct < 2:
                     continue
                 if c.trade_value < 10_000_000_000:
                     continue
-                all_candidates[c.code] = {
-                    "code": c.code, "name": c.name, "price": c.price,
-                    "change_pct": c.change_pct, "trade_value": c.trade_value,
-                    "score": c.score, "reasons": list(c.reasons),
-                    "source": "volume",
-                }
-            logger.info("[관심종목] 거래량 스캐너: %d종목", len(all_candidates))
+            all_candidates[c.code] = {
+                "code": c.code, "name": c.name, "price": c.price,
+                "change_pct": c.change_pct, "trade_value": c.trade_value,
+                "score": c.score, "reasons": list(c.reasons),
+                "source": "volume",
+            }
+        logger.info("[관심종목] 거래량 스캐너: %d종목", len(all_candidates))
 
         # 1b. 멀티소스 (pykrx — 외인/기관/52주/낙폭)
         try:
