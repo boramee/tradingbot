@@ -51,6 +51,8 @@ class WatchItem:
     ma5: float = 0.0                 # 5일 이평선
     ma20: float = 0.0                # 20일 이평선
     pullback_target: float = 0.0     # 눌림목 매수 목표가
+    foreign_flow: int = 0            # 외국인 연속 순매수 일수 (음수=순매도)
+    inst_flow: int = 0               # 기관 연속 순매수 일수
     expired: bool = False            # 만료 여부
 
 
