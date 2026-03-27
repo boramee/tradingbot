@@ -233,8 +233,8 @@ class StockEngine(BaseTradingEngine):
             price = self._market_filter_cache.get("price", 0)
             ma20 = self._market_filter_cache.get("ma20", 0)
             gap_pct = (price - ma20) / ma20 * 100 if ma20 > 0 else 0
-            # -3% 이상 벌어져야 차단 (소폭 하회는 허용)
-            if gap_pct <= -3:
+            # -5% 이상 벌어져야 차단 (소폭 하회는 허용)
+            if gap_pct <= -5:
                 return False, "코스피 20일선 -%.1f%% 하회 (KODEX200:%s원 < 20MA:%s원)" % (
                     abs(gap_pct),
                     "{:,}".format(int(price)),
@@ -1588,7 +1588,7 @@ class StockEngine(BaseTradingEngine):
                      self.take_profit_pct, self.trailing_pct)
         logger.info("  보유: 최대 5거래일 | 보호: 3연속손실→쿨다운 | 일일-3%%→Kill Switch")
         logger.info("  진입: 관심종목 등급제(A/B/C) 눌림목 매수")
-        logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 -3%%이상 하회 차단 (소폭하회: A등급만 허용)")
+        logger.info("  시장필터: VKOSPI≥25 차단 + 코스피20일선 -5%%이상 하회 차단 (소폭하회: A등급만 허용)")
         logger.info("  수급필터: 외국인 3일연속 순매도 종목 제외 (pykrx)")
         logger.info("  스캔: 1시간 주기 (09~14시) + 15:10 마감 + 회복긴급 (멀티소스)")
         logger.info("  소스: 거래량순위 + 외인순매수 + 기관순매수 + 52주신고가 + 낙폭과대")
